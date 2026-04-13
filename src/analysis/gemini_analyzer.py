@@ -50,37 +50,62 @@ class GeminiAnalyzer:
             system_instruction=self.system_instruction
         )
 
-    def generate_report(self, quant_data_json, news_text, generation_time):
+    def generate_market_summary(self, macro_data, market_breadth, news_text, generation_time):
         """
-        Generates a markdown report using Gemini based on quant data and news.
+        [Step 1] Generates a market summary analyzing macro factors, market breadth, and news.
         """
         prompt = f"""
 [Report Generation Info]
 - 작성 시간: {generation_time}
 
-[Quant Data from Supabase]
-제공 데이터에는 다음 테이블 정보가 포함되어 있습니다:
-- normalized_global_macro_daily / market_breadth_daily (매크로/마켓 지표)
-- normalized_stock_short_selling (공매도 지표: short_ratio 등)
-- normalized_stock_fundamentals_ratios (밸류에이션: PER, PBR 등)
-- normalized_stock_supply_daily (수급: pension_net_buy, corporate_net_buy 등)
-- feature_store_daily (상세 퀀트 팩터)
-* 모든 종목 데이터에는 'stock_name' 필드가 포함되어 있으니 가독성을 위해 적극 활용하세요.
-
-데이터 상세:
-{json.dumps(quant_data_json, indent=2, ensure_ascii=False)}
+[거시 지표 / Market Breadth Data]
+{json.dumps({"macro_data": macro_data, "market_breadth": market_breadth}, indent=2, ensure_ascii=False)}
 
 [News Text from Google Docs]
 {news_text}
 
-위 데이터를 바탕으로 리포트를 작성해줘.
+[System Instruction]
+거시 지표와 뉴스를 바탕으로 코스피/코스닥/선물옵션 시장의 시황을 상세히 분석하라. 
+단순 값 나열이 아닌, 데이터가 의미하는 향후 시장 방향성을 논리적으로 서술하라.
+마크다운 형식으로 작성해줘.
 """
-        
         response = self.model.generate_content(
             contents=[{"role": "user", "parts": [{"text": prompt}]}],
             generation_config=genai.types.GenerationConfig(
                 temperature=0.7,
             ),
         )
-        
+        return response.text
+
+    def generate_stock_analysis(self, market_summary, top_volume_data, target_stocks_data, generation_time):
+        """
+        [Step 2] Generates stock-specific deep dives using the market summary as context.
+        """
+        prompt = f"""
+[Report Generation Info]
+- 작성 시간: {generation_time}
+
+[Market Summary Context]
+{market_summary}
+
+[Top Volume Stocks (KOSPI/KOSDAQ/ETF)]
+{json.dumps(top_volume_data, indent=2, ensure_ascii=False)}
+
+[Target Stocks Data]
+데이터 포함: supply, fundamentals, short selling, feature store
+{json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
+
+[System Instruction]
+앞서 분석된 시황(Market Summary Context)을 배경으로 다음을 수행하라. 
+첫째, 코스피/코스닥/ETF 거래량 상위 5종목의 퀀트 지표를 짧게 평가하라. 
+둘째, 타겟 관심 종목(Target Stocks)에 대해서는 수급(연기금/외국인), 밸류에이션(PER/PBR), 공매도 데이터를 모두 활용하여 '심층적인 투자 뷰(Z-score 및 시그널 포함)'를 개별적으로 작성하라. 
+결측치는 언급하지 말고 있는 데이터를 중심으로 분석하라.
+마크다운 형식으로 작성해줘.
+"""
+        response = self.model.generate_content(
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.7,
+            ),
+        )
         return response.text

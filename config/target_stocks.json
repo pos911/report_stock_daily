@@ -1,0 +1,44 @@
+[
+  {
+    "symbol": "017670",
+    "name": "SK텔레콤",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "222800",
+    "name": "심텍",
+    "market": "KOSDAQ",
+    "enabled": true
+  },
+  {
+    "symbol": "000720",
+    "name": "현대건설",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "063080",
+    "name": "컴투스홀딩스",
+    "market": "KOSDAQ",
+    "enabled": true
+  },
+  {
+    "symbol": "047810",
+    "name": "한국항공우주",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "005930",
+    "name": "삼성전자",
+    "market": "KOSPI",
+    "enabled": true
+  },
+  {
+    "symbol": "000660",
+    "name": "SK하이닉스",
+    "market": "KOSPI",
+    "enabled": true
+  }
+]
