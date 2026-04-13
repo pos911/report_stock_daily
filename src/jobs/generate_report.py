@@ -32,14 +32,18 @@ def main():
 
     # 3. Generate report
     print("Generating report via Gemini...")
-    report_content = analyzer.generate_report(quant_data, news_text)
+    # Calculate KST time (UTC+9) for consistent reporting even in GitHub Actions (UTC)
+    kst_tz = datetime.timezone(datetime.timedelta(hours=9))
+    now_kst = datetime.datetime.now(kst_tz)
+    generation_time_str = now_kst.strftime('%Y-%m-%d %H:%M (KST)')
+    
+    report_content = analyzer.generate_report(quant_data, news_text, generation_time_str)
 
     # 4. Save report
     reports_dir = project_root / "reports"
     reports_dir.mkdir(exist_ok=True)
 
-    now = datetime.datetime.now()
-    file_name = f"daily_quant_report_{now.strftime('%Y%m%d_%H%M')}.md"
+    file_name = f"daily_quant_report_{now_kst.strftime('%Y%m%d_%H%M')}.md"
     file_path = reports_dir / file_name
 
     with open(file_path, "w", encoding="utf-8") as f:

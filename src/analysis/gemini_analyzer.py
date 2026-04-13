@@ -50,11 +50,14 @@ class GeminiAnalyzer:
             system_instruction=self.system_instruction
         )
 
-    def generate_report(self, quant_data_json, news_text):
+    def generate_report(self, quant_data_json, news_text, generation_time):
         """
         Generates a markdown report using Gemini based on quant data and news.
         """
         prompt = f"""
+[Report Generation Info]
+- 작성 시간: {generation_time}
+
 [Quant Data from Supabase]
 제공 데이터에는 다음 테이블 정보가 포함되어 있습니다:
 - normalized_global_macro_daily / market_breadth_daily (매크로/마켓 지표)
