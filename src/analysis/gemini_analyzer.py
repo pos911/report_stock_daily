@@ -6,39 +6,65 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class GeminiAnalyzer:
-    def __init__(self, config_path="config/api_keys.json"):
+    def __init__(self, key_config_path="config/api_keys.json", settings_config_path="config/analyzer_settings.json"):
         """
-        Initialize Gemini API by reading from environment variables or a JSON file.
+        Initialize Gemini API and load model settings.
+        Priority for API Key: 1. Env Var, 2. api_keys.json
+        Priority for Settings: 1. analyzer_settings.json, 2. Env Vars, 3. Defaults
         """
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        load_dotenv()
+        
+        # 1. Load API Key (Priority: api_keys.json > Env Var)
+        self.api_key = None
+        if os.path.exists(key_config_path):
+            with open(key_config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                # Check nested 'gemini' or root 'gemini_api_key'
+                self.api_key = config.get("gemini", {}).get("api_key") or config.get("gemini_api_key")
+        
+        if not self.api_key:
+            self.api_key = os.getenv("GEMINI_API_KEY")
 
         if not self.api_key:
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    self.api_key = config.get("gemini_api_key")
-
-        if not self.api_key:
-            raise ValueError("Gemini API Key must be provided via Env or JSON.")
+            raise ValueError("Gemini API Key must be provided via config/api_keys.json or GEMINI_API_KEY environment variable.")
 
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
+
+        # 2. Load Model Settings
+        self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
+        self.system_instruction = os.getenv("GEMINI_SYSTEM_INSTRUCTION")
+
+        if os.path.exists(settings_config_path):
+            with open(settings_config_path, "r", encoding="utf-8") as f:
+                settings = json.load(f).get("gemini", {})
+                self.model_name = settings.get("model_name", self.model_name)
+                self.system_instruction = settings.get("system_instruction", self.system_instruction)
+
+        if not self.system_instruction:
+            # Minimal fallback if no instruction provided
+            self.system_instruction = "You are a financial analyst."
+
+        # Initialize the model with system instruction
+        self.model = genai.GenerativeModel(
+            model_name=self.model_name,
+            system_instruction=self.system_instruction
+        )
 
     def generate_report(self, quant_data_json, news_text):
         """
         Generates a markdown report using Gemini based on quant data and news.
         """
-        system_instruction = (
-            "너는 최고 수준의 퀀트 애널리스트야. 제공된 정량적 데이터(Supabase)와 정성적 뉴스(Google Docs)를 결합하여 마크다운 리포트를 작성해. "
-            "반드시 다음의 금융 공학 이론을 적용해서 뷰를 작성할 것:\n"
-            "1. Fama-French 요인 모델 및 한국 주식 시장의 반전(Reversal) 전략 관점.\n"
-            "2. 외국인/기관 순매수 Z-Score와 이동평균선(MA)을 활용한 기술적 매수/매도 시그널 판단.\n"
-            "3. VIX, 하이일드 스프레드, 구리/금 비율, 그리고 코스피 시장 전체의 등락 종목 수(Market Breadth)를 바탕으로 한 마켓 타이밍 및 현금 비중(Risk) 조절 전략.\n"
-            "결과는 서론-매크로 분석-퀀트 시그널-최종 투자 전략(포트폴리오 비중) 순서로 상세히 작성해."
-        )
-
         prompt = f"""
 [Quant Data from Supabase]
+제공 데이터에는 다음 테이블 정보가 포함되어 있습니다:
+- normalized_global_macro_daily / market_breadth_daily (매크로/마켓 지표)
+- normalized_stock_short_selling (공매도 지표: short_ratio 등)
+- normalized_stock_fundamentals_ratios (밸류에이션: PER, PBR 등)
+- normalized_stock_supply_daily (수급: pension_net_buy, corporate_net_buy 등)
+- feature_store_daily (상세 퀀트 팩터)
+* 모든 종목 데이터에는 'stock_name' 필드가 포함되어 있으니 가독성을 위해 적극 활용하세요.
+
+데이터 상세:
 {json.dumps(quant_data_json, indent=2, ensure_ascii=False)}
 
 [News Text from Google Docs]
@@ -52,16 +78,6 @@ class GeminiAnalyzer:
             generation_config=genai.types.GenerationConfig(
                 temperature=0.7,
             ),
-            # Optional: system_instruction can be passed during model initialization 
-            # but for simplicity in this script we include it in the prompt or as a separate instruction if supported.
         )
         
-        # If the model was initialized with system_instruction, we don't need to repeat it.
-        # However, to be safe and follow user instructions exactly:
-        model_with_sys = genai.GenerativeModel(
-            model_name='gemini-2.0-flash',
-            system_instruction=system_instruction
-        )
-        response = model_with_sys.generate_content(prompt)
-
         return response.text

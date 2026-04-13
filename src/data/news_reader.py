@@ -1,10 +1,19 @@
+import os
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def fetch_news_document():
     """
     Downloads text from a specific Google Docs export URL.
+    The URL is expected to be provided via the GOOGLE_DOCS_NEWS_URL environment variable.
     """
-    url = "https://docs.google.com/document/export?format=txt&id=1J5iXVQssP45ASr1vqF9bGR7On9JD7ZhWE8GhEtFJb_4"
+    url = os.getenv("GOOGLE_DOCS_NEWS_URL")
+    if not url:
+        print("Error: GOOGLE_DOCS_NEWS_URL environment variable is not set.")
+        return ""
+
     try:
         response = requests.get(url)
         response.raise_for_status()

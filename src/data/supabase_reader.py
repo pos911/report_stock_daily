@@ -32,38 +32,103 @@ class SupabaseReader:
 
         self.client: Client = create_client(self.url, self.key)
 
+    def _fetch_stock_name_map(self):
+        """
+        Fetches all (symbol, name) mappings from stocks_master and caches them.
+        """
+        try:
+            response = self.client.table("stocks_master").select("symbol, name").execute()
+            if response.data:
+                return {item["symbol"]: item["name"] for item in response.data}
+        except Exception as e:
+            print(f"Error fetching stock name map: {e}")
+        return {}
+
+    def _fetch_and_ffill_timeseries(self, table_name, lookback_days=5):
+        """
+        Fetches the last N days of data from a table, applies forward fill,
+        and returns the most recent record as a dictionary.
+        """
+        try:
+            response = self.client.table(table_name).select("*").order("base_date", desc=True).limit(lookback_days).execute()
+            if not response.data:
+                return None
+            
+            df = pd.DataFrame(response.data)
+            # Sort from oldest to newest for ffill
+            df = df.sort_values("base_date")
+            df = df.ffill()
+            
+            return df.iloc[-1].to_dict()
+        except Exception as e:
+            print(f"Error fetching/ffilling timeseries for {table_name}: {e}")
+            return None
+
+    def _inject_stock_names(self, data, name_map):
+        """
+        Injects stock names into the data list using a pre-fetched name map.
+        Example: {'symbol': '005930'} becomes {'symbol': '005930', 'stock_name': '삼성전자'}
+        """
+        if not data:
+            return []
+        
+        for item in data:
+            symbol = item.get("symbol")
+            if symbol and symbol in name_map:
+                item["stock_name"] = name_map[symbol]
+        return data
+
     def fetch_latest_data(self):
         """
         Fetches the latest data with weekend gap filling and full feature counts.
+        Expanded to include stock names and additional analysis tables.
         """
         results = {}
-
-        # 1. Macro and Market Breadth (ffill for weekend/holidays)
-        for table in ["normalized_global_macro_daily", "market_breadth_daily"]:
-            # Fetch last 5 rows to ensure we capture the most recent Friday if it's currently Sunday/Monday
-            response = self.client.table(table).select("*").order("base_date", desc=True).limit(5).execute()
-            
-            if response.data:
-                df = pd.DataFrame(response.data)
-                # Ensure past-to-future order for forward fill
-                df = df.sort_values("base_date")
-                # Forward fill missing values (captures weekday data to holiday/weekend slots)
-                df = df.ffill()
-                # Take the latest row (the intended target day)
-                results[table] = df.iloc[-1].to_dict()
-            else:
-                results[table] = None
-
-        # 2. Feature Store (Collect all symbols for the latest date)
-        # First, find the latest date
-        date_query = self.client.table("feature_store_daily").select("base_date").order("base_date", desc=True).limit(1).execute()
         
-        if date_query.data:
-            latest_date = date_query.data[0]["base_date"]
-            # Fetch ALL rows for that specific date (no limit)
-            feature_query = self.client.table("feature_store_daily").select("*").eq("base_date", latest_date).execute()
-            results["feature_store_daily"] = feature_query.data if feature_query.data else []
-        else:
+        # Build stock name map first
+        name_map = self._fetch_stock_name_map()
+
+        # 1. Market-level Time-series (ffill for weekend/holidays)
+        market_tables = [
+            "normalized_global_macro_daily",
+            "market_breadth_daily"
+        ]
+        for table in market_tables:
+            results[table] = self._fetch_and_ffill_timeseries(table)
+
+        # 2. Stock-level Analysis Tables (Latest Snapshot)
+        stock_analysis_tables = [
+            "normalized_stock_short_selling",
+            "normalized_stock_fundamentals_ratios",
+            "normalized_stock_supply_daily"
+        ]
+        
+        for table in stock_analysis_tables:
+            try:
+                # Find the latest date in the table
+                date_query = self.client.table(table).select("base_date").order("base_date", desc=True).limit(1).execute()
+                if date_query.data:
+                    latest_date = date_query.data[0]["base_date"]
+                    # Fetch all rows for that date
+                    data_query = self.client.table(table).select("*").eq("base_date", latest_date).execute()
+                    results[table] = self._inject_stock_names(data_query.data, name_map)
+                else:
+                    results[table] = []
+            except Exception as e:
+                print(f"Error fetching {table}: {e}")
+                results[table] = []
+
+        # 3. Feature Store (Detailed Quant Features)
+        try:
+            date_query = self.client.table("feature_store_daily").select("base_date").order("base_date", desc=True).limit(1).execute()
+            if date_query.data:
+                latest_date = date_query.data[0]["base_date"]
+                feature_query = self.client.table("feature_store_daily").select("*").eq("base_date", latest_date).execute()
+                results["feature_store_daily"] = self._inject_stock_names(feature_query.data, name_map)
+            else:
+                results["feature_store_daily"] = []
+        except Exception as e:
+            print(f"Error fetching feature_store_daily: {e}")
             results["feature_store_daily"] = []
 
         return results
