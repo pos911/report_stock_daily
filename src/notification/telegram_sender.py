@@ -1,9 +1,6 @@
 import os
 import json
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Telegram sendMessage has a 4096 character limit
 TELEGRAM_MSG_LIMIT = 4096
@@ -13,23 +10,29 @@ class TelegramSender:
     def __init__(self, config_path="config/api_keys.json"):
         """
         Initialize Telegram Bot credentials.
-        Priority: 1. Environment Variables, 2. api_keys.json
+        Priority: 1. api_keys.json, 2. Environment Variables
         """
-        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.bot_token = None
+        self.chat_id = None
 
-        if not self.bot_token or not self.chat_id:
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    tg_config = config.get("telegram", {})
-                    self.bot_token = self.bot_token or tg_config.get("bot_token")
-                    self.chat_id = self.chat_id or tg_config.get("chat_id")
+        # 1. Try api_keys.json first
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                tg_config = config.get("telegram", {})
+                self.bot_token = tg_config.get("bot_token")
+                self.chat_id = tg_config.get("chat_id")
+
+        # 2. Fallback to env vars
+        if not self.bot_token:
+            self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if not self.chat_id:
+            self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
         if not self.bot_token or not self.chat_id:
             raise ValueError(
                 "Telegram bot_token and chat_id must be provided "
-                "via Env (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) or config/api_keys.json."
+                "via config/api_keys.json or env vars."
             )
 
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}"
