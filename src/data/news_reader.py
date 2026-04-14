@@ -3,22 +3,14 @@ import json
 import requests
 
 
-def fetch_news_document(config_path="config/api_keys.json"):
-    """
-    Downloads text from a specific Google Docs export URL.
-    Priority: 1. api_keys.json, 2. GOOGLE_DOCS_NEWS_URL env var
-    """
-    url = None
+from src.utils import config
 
-    # 1. Try api_keys.json first
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-            url = config.get("google_docs", {}).get("news_url")
-
-    # 2. Fallback to env var
-    if not url:
-        url = os.getenv("GOOGLE_DOCS_NEWS_URL")
+def fetch_news_document():
+    """
+    Downloads text from a specific Google Docs export URL using the unified config loader.
+    Priority: 1. Environment Variable, 2. config/api_keys.json
+    """
+    url = config.get("news_url", section="google_docs")
 
     if not url:
         print("Warning: Google Docs news URL not found in api_keys.json or env var. Skipping news.")

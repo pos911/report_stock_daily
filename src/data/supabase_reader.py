@@ -7,25 +7,16 @@ load_dotenv()
 
 import pandas as pd
 
-class SupabaseReader:
-    def __init__(self, config_path="config/api_keys.json"):
-        """
-        Initialize Supabase client by reading from environment variables or a JSON file.
-        Priority: 
-        1. Environment Variables (for GitHub Actions)
-        2. Local JSON config file
-        """
-        self.url = os.getenv("SUPABASE_URL")
-        self.key = os.getenv("SUPABASE_KEY")
+from src.utils import config
 
-        if not self.url or not self.key:
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    # Check for nested 'supabase' key or root keys
-                    supabase_config = config.get("supabase", {})
-                    self.url = self.url or supabase_config.get("url") or config.get("supabase_url")
-                    self.key = self.key or supabase_config.get("service_role_key") or config.get("supabase_key")
+class SupabaseReader:
+    def __init__(self):
+        """
+        Initialize Supabase client using the unified config loader.
+        Priority: 1. Environment Variables, 2. config/api_keys.json
+        """
+        self.url = config.get("url", section="supabase")
+        self.key = config.get("service_role_key", section="supabase") or config.get("supabase_key")
 
         if not self.url or not self.key:
             raise ValueError("Supabase URL and Key must be provided via Env or JSON.")

@@ -5,26 +5,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.utils import config
+
 class GeminiAnalyzer:
-    def __init__(self, key_config_path="config/api_keys.json", settings_config_path="config/analyzer_settings.json"):
+    def __init__(self, settings_config_path="config/analyzer_settings.json"):
         """
         Initialize Gemini API and load model settings.
-        Priority for API Key: 1. Env Var, 2. api_keys.json
+        Priority for API Key: 1. Env Var, 2. config/api_keys.json
         Priority for Settings: 1. analyzer_settings.json, 2. Env Vars, 3. Defaults
         """
-        load_dotenv()
+        # 1. Load API Key using unified config loader
+        self.api_key = config.get("api_key", section="gemini")
         
-        # 1. Load API Key (Priority: api_keys.json > Env Var)
-        self.api_key = None
-        if os.path.exists(key_config_path):
-            with open(key_config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-                # Check nested 'gemini' or root 'gemini_api_key'
-                self.api_key = config.get("gemini", {}).get("api_key") or config.get("gemini_api_key")
-        
-        if not self.api_key:
-            self.api_key = os.getenv("GEMINI_API_KEY")
-
         if not self.api_key:
             raise ValueError("Gemini API Key must be provided via config/api_keys.json or GEMINI_API_KEY environment variable.")
 
@@ -65,8 +57,13 @@ class GeminiAnalyzer:
 {news_text}
 
 [System Instruction]
-거시 지표와 뉴스를 바탕으로 코스피/코스닥/선물옵션 시장의 시황을 상세히 분석하라. 
+거시 지표와 뉴스를 바탕으로 코스피/코스닥/선물옵션 시장의 전체적인 매크로 시황만 상세히 분석하라. 
+종목별 지표(PER, PBR, 수급, 공매도 등)나 개별 주식에 대한 언급은 이 단계에서 절대 하지 마라. 오직 거시경제(환율, 금리, 유가 등)와 뉴스 요약에만 집중하라.
 단순 값 나열이 아닌, 데이터가 의미하는 향후 시장 방향성을 논리적으로 서술하라.
+오직 '거시경제/뉴스 요약' 내용만 단일 섹션으로 생성하며, 인사말/전체 서론/전체 결론은 절대 금지한다.
+# 이나 ## 같은 최상위/대분류 마크다운 헤더는 파이썬에서 직접 조립할 예정이므로 이곳에서는 생성하지 마라 (### 부터 사용할 것).
+"데이터가 없다"는 식의 불필요한 안내 문구는 절대 출력하지 말고 결측치는 조용히 누락(Skip)하라.
+If any requested data is missing, DO NOT mention that it is missing. Do not say 'Data is not provided' or 'Cannot analyze due to lack of data'. Simply skip it and analyze only what is available.
 마크다운 형식으로 작성해줘.
 """
         response = self.model.generate_content(
@@ -96,10 +93,19 @@ class GeminiAnalyzer:
 {json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
 
 [System Instruction]
-앞서 분석된 시황(Market Summary Context)을 배경으로 다음을 수행하라. 
-첫째, 코스피/코스닥/ETF 거래량 상위 5종목의 퀀트 지표를 짧게 평가하라. 
-둘째, 타겟 관심 종목(Target Stocks)에 대해서는 수급(연기금/외국인), 밸류에이션(PER/PBR), 공매도 데이터를 모두 활용하여 '심층적인 투자 뷰(Z-score 및 시그널 포함)'를 개별적으로 작성하라. 
-결측치는 언급하지 말고 있는 데이터를 중심으로 분석하라.
+앞서 분석된 시황(Market Summary Context)을 바탕으로 아래 내용을 수행하라.
+인사말이나 전체 서론, 결론은 절대 생성하지 말고 곧바로 본론(분석 내용)만 출력하라.
+파이썬 코드 단에서 타이틀을 조립하므로, # 이나 ## 같은 최상위 마크다운 헤더는 생성하지 마라 (필요 시 ### 부터 사용).
+
+첫째, 코스피/코스닥/ETF 거래량 상위 5종목의 퀀트 지표를 짧고 핵심만 평가하라. 
+둘째, 타겟 관심 종목(Target Stocks) 분석 시 나열식 설명을 완전히 폐기하고, 반드시 종목별로 다음 '3단계 개조식(Bullet points)' 뷰(View) 구조로만 답변을 강제하라:
+  - 1) 공격적인 포인트
+  - 2) 최대한 보수적인 포인트
+  - 3) 최종 결론 (BUY / HOLD / SELL)
+
+어떤 경우에도 "현재 데이터가 제공되지 않아..." 혹은 "데이터가 부족하여..." 등의 문구는 절대 출력하지 마라.
+If a specific metric (e.g., PER, PBR, Z-score, supply data) is missing for a stock, DO NOT write 'N/A' or 'Not available'. Completely omit any mention of that metric and base your analysis only on the provided data.
+분석 데이터가 없는 부분이나 누락된 종목은 설명 없이 조용히 제외(Skip)하고, 있는 데이터로만 분석하라.
 마크다운 형식으로 작성해줘.
 """
         response = self.model.generate_content(

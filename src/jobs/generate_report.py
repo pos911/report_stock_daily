@@ -69,8 +69,16 @@ def main():
         generation_time=generation_time_str
     )
 
-    # Combine report
-    final_report = f"{market_summary_md}\n\n---\n\n{stock_analysis_md}"
+    # Combine report with well-structured headers (assembly logic)
+    final_report = (
+        f"# Daily Quant Report\n"
+        f"> **Generated at**: {generation_time_str}\n\n"
+        f"## 1. Market Summary\n\n"
+        f"{market_summary_md.strip()}\n\n"
+        f"---\n\n"
+        f"## 2. Stock Analysis & Strategy\n\n"
+        f"{stock_analysis_md.strip()}"
+    )
 
     # 5. Save report
     reports_dir = project_root / "reports"

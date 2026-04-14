@@ -6,28 +6,16 @@ import requests
 TELEGRAM_MSG_LIMIT = 4096
 
 
+from src.utils import config
+
 class TelegramSender:
-    def __init__(self, config_path="config/api_keys.json"):
+    def __init__(self):
         """
-        Initialize Telegram Bot credentials.
-        Priority: 1. api_keys.json, 2. Environment Variables
+        Initialize Telegram Bot credentials using the unified config loader.
+        Priority: 1. Environment Variables, 2. config/api_keys.json
         """
-        self.bot_token = None
-        self.chat_id = None
-
-        # 1. Try api_keys.json first
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-                tg_config = config.get("telegram", {})
-                self.bot_token = tg_config.get("bot_token")
-                self.chat_id = tg_config.get("chat_id")
-
-        # 2. Fallback to env vars
-        if not self.bot_token:
-            self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not self.chat_id:
-            self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.bot_token = config.get("bot_token", section="telegram")
+        self.chat_id = config.get("chat_id", section="telegram")
 
         if not self.bot_token or not self.chat_id:
             raise ValueError(
