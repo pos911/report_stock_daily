@@ -34,11 +34,43 @@ jobs:
       env:
         API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
       run: |
-        # Parse nested OR top-level keys
-        export SUPABASE_URL=$(echo $API_KEYS_JSON | jq -r 'if .supabase.url then .supabase.url else .supabase_url // empty end')
-        export SUPABASE_KEY=$(echo $API_KEYS_JSON | jq -r 'if .supabase.service_role_key then .supabase.service_role_key else .supabase_key // empty end')
-        export GEMINI_API_KEY=$(echo $API_KEYS_JSON | jq -r 'if .gemini_api_key then .gemini_api_key else .GEMINI_API_KEY // empty end')
-        
+        python - <<'PY'
+        import json
+        import os
+
+        raw = os.getenv("API_KEYS_JSON", "")
+        if not raw:
+            raise RuntimeError("API_KEYS_JSON secret is empty.")
+
+        config = json.loads(raw)
+
+        def pick(*values):
+            for value in values:
+                if value:
+                    return value
+            return ""
+
+        env_map = {
+            "SUPABASE_URL": pick(config.get("supabase", {}).get("url"), config.get("supabase_url")),
+            "SUPABASE_KEY": pick(config.get("supabase", {}).get("service_role_key"), config.get("supabase_key")),
+            "GEMINI_API_KEY": pick(config.get("gemini", {}).get("api_key"), config.get("gemini_api_key"), config.get("GEMINI_API_KEY")),
+            "TELEGRAM_BOT_TOKEN": pick(config.get("telegram", {}).get("bot_token"), config.get("telegram_bot_token"), config.get("TELEGRAM_BOT_TOKEN")),
+            "TELEGRAM_CHAT_ID": pick(config.get("telegram", {}).get("chat_id"), config.get("telegram_chat_id"), config.get("TELEGRAM_CHAT_ID")),
+            "GOOGLE_DOCS_NEWS_URL": pick(config.get("google_docs", {}).get("news_url"), config.get("google_docs_news_url"), config.get("GOOGLE_DOCS_NEWS_URL")),
+        }
+
+        required = ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY")
+        missing = [key for key in required if not env_map.get(key)]
+        if missing:
+            raise RuntimeError(f"Missing required keys in API_KEYS_JSON: {', '.join(missing)}")
+
+        github_env = os.environ["GITHUB_ENV"]
+        with open(github_env, "a", encoding="utf-8") as f:
+            for key, value in env_map.items():
+                if value:
+                    f.write(f"{key}={value}\n")
+        PY
+
         python src/jobs/generate_report.py
 
     - name: Commit and Push Report

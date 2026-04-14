@@ -87,7 +87,11 @@ def main():
     # 6. Send report via Telegram
     try:
         sender = TelegramSender()
-        sender.send_report(final_report)
+        sent = sender.send_report(final_report)
+        if sent:
+            print("Telegram notification sent successfully.")
+        else:
+            print("Telegram notification request completed, but delivery failed.")
     except Exception as e:
         print(f"Telegram notification failed (non-fatal): {e}")
 
