@@ -64,14 +64,21 @@ jobs:
         if missing:
             raise RuntimeError(f"Missing required keys in API_KEYS_JSON: {', '.join(missing)}")
 
-        github_env = os.environ["GITHUB_ENV"]
-        with open(github_env, "a", encoding="utf-8") as f:
+        # Use a step-local env file so values are available immediately in this step.
+        # Do not write secrets into GITHUB_ENV (that would leak into later steps).
+        env_file = ".runtime_env"
+        with open(env_file, "w", encoding="utf-8") as f:
             for key, value in env_map.items():
                 if value:
-                    f.write(f"{key}={value}\n")
+                    if key in {"SUPABASE_KEY", "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"}:
+                        print(f"::add-mask::{value}")
+                    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+                    f.write(f'export {key}="{escaped}"\n')
         PY
 
+        source .runtime_env
         python src/jobs/generate_report.py
+        rm -f .runtime_env
 
     - name: Commit and Push Report
       run: |
