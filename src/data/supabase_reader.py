@@ -82,7 +82,7 @@ class SupabaseReader:
             results[table] = self._fetch_and_ffill_timeseries(table)
         return results
 
-    def fetch_top_volume_stocks(self, limit=5):
+    def fetch_top_volume_stocks(self, limit=20):
         """
         Fetches top volume stocks for KOSPI, KOSDAQ, and ETF based on the latest available data.
         """
@@ -100,13 +100,12 @@ class SupabaseReader:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
         try:
-            # Get latest base_date from a reliable table like fundamentals or breadth
-            date_query = self.client.table("normalized_stock_fundamentals_ratios").select("base_date").order("base_date", desc=True).limit(1).execute()
+            # Get latest base_date from feature_store_daily feature_name='volume'
+            date_query = self.client.table("feature_store_daily").select("base_date").eq("feature_name", "volume").order("base_date", desc=True).limit(1).execute()
             if not date_query.data:
                 return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
             latest_date = date_query.data[0]["base_date"]
 
-            # Assuming volume is in feature_store_daily under "volume" (or "acc_trdvol")
             vol_query = self.client.table("feature_store_daily").select("symbol, feature_value").eq("base_date", latest_date).eq("feature_name", "volume").execute()
             
             result = {"KOSPI": [], "KOSDAQ": [], "ETF": []}
@@ -122,6 +121,7 @@ class SupabaseReader:
                     result[market].append({
                         "symbol": sym,
                         "stock_name": name_map.get(sym, "Unknown"),
+                        "market": market,
                         "volume": item["feature_value"]
                     })
             return result
@@ -139,6 +139,16 @@ class SupabaseReader:
         name_map = self._fetch_stock_name_map()
         results = {}
         
+        try:
+            # Get latest base_date globally from feature_store_daily for volume
+            date_query = self.client.table("feature_store_daily").select("base_date").eq("feature_name", "volume").order("base_date", desc=True).limit(1).execute()
+            if not date_query.data:
+                return {}
+            latest_date = date_query.data[0]["base_date"]
+        except Exception as e:
+            print(f"Error fetching latest date for target stocks: {e}")
+            return {}
+
         stock_analysis_tables = [
             "normalized_stock_short_selling",
             "normalized_stock_fundamentals_ratios",
@@ -147,25 +157,15 @@ class SupabaseReader:
         
         for table in stock_analysis_tables:
             try:
-                date_query = self.client.table(table).select("base_date").order("base_date", desc=True).limit(1).execute()
-                if date_query.data:
-                    latest_date = date_query.data[0]["base_date"]
-                    data_query = self.client.table(table).select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
-                    results[table] = self._inject_stock_names(data_query.data, name_map)
-                else:
-                    results[table] = []
+                data_query = self.client.table(table).select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
+                results[table] = self._inject_stock_names(data_query.data, name_map)
             except Exception as e:
                 print(f"Error fetching {table} for target stocks: {e}")
                 results[table] = []
 
         try:
-            date_query = self.client.table("feature_store_daily").select("base_date").order("base_date", desc=True).limit(1).execute()
-            if date_query.data:
-                latest_date = date_query.data[0]["base_date"]
-                feature_query = self.client.table("feature_store_daily").select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
-                results["feature_store_daily"] = self._inject_stock_names(feature_query.data, name_map)
-            else:
-                results["feature_store_daily"] = []
+            feature_query = self.client.table("feature_store_daily").select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
+            results["feature_store_daily"] = self._inject_stock_names(feature_query.data, name_map)
         except Exception as e:
             print(f"Error fetching feature_store_daily for target stocks: {e}")
             results["feature_store_daily"] = []

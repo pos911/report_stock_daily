@@ -97,7 +97,7 @@ If any requested data is missing, DO NOT mention that it is missing. Do not say 
 인사말이나 전체 서론, 결론은 절대 생성하지 말고 곧바로 본론(분석 내용)만 출력하라.
 파이썬 코드 단에서 타이틀을 조립하므로, # 이나 ## 같은 최상위 마크다운 헤더는 생성하지 마라 (필요 시 ### 부터 사용).
 
-첫째, 코스피/코스닥/ETF 거래량 상위 5종목의 퀀트 지표를 짧고 핵심만 평가하라. 
+첫째, 코스피/코스닥/ETF 거래량 상위 최대 20종목의 퀀트 지표를 짧고 핵심만 평가하라. 종목별로 소속 시장(KOSPI, KOSDAQ, ETF)을 명시하라.
 둘째, 타겟 관심 종목(Target Stocks) 분석 시 나열식 설명을 완전히 폐기하고, 반드시 종목별로 다음 '3단계 개조식(Bullet points)' 뷰(View) 구조로만 답변을 강제하라:
   - 1) 공격적인 포인트
   - 2) 최대한 보수적인 포인트
@@ -105,7 +105,7 @@ If any requested data is missing, DO NOT mention that it is missing. Do not say 
 
 어떤 경우에도 "현재 데이터가 제공되지 않아..." 혹은 "데이터가 부족하여..." 등의 문구는 절대 출력하지 마라.
 If a specific metric (e.g., PER, PBR, Z-score, supply data) is missing for a stock, DO NOT write 'N/A' or 'Not available'. Completely omit any mention of that metric and base your analysis only on the provided data.
-분석 데이터가 없는 부분이나 누락된 종목은 설명 없이 조용히 제외(Skip)하고, 있는 데이터로만 분석하라.
+분석 데이터가 없는 부분이나 누락된 종목은 설명 없이 완전히 무시(Silent Skip)하고, 해당 항목에 대한 마크다운 제목조차 출력하지 마라.
 마크다운 형식으로 작성해줘.
 """
         response = self.model.generate_content(
