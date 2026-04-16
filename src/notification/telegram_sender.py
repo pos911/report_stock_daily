@@ -73,8 +73,11 @@ class TelegramSender:
     @staticmethod
     def _split_text(text, limit):
         """
-        Splits text into chunks of at most `limit` characters,
-        preferring to break at newline boundaries for cleaner messages.
+        Splits text into chunks of at most `limit` characters.
+        Priority:
+        1. Double newline (\n\n) - best for markdown sections
+        2. Single newline (\n)
+        3. Hard cut (limit)
         """
         if len(text) <= limit:
             return [text]
@@ -85,10 +88,15 @@ class TelegramSender:
                 chunks.append(text)
                 break
 
-            # Find the last newline within the limit
-            split_pos = text.rfind("\n", 0, limit)
+            # 1. Try splitting at double newline
+            split_pos = text.rfind("\n\n", 0, limit)
+            
+            # 2. Try single newline if no double newline found
             if split_pos == -1:
-                # No newline found — hard cut
+                split_pos = text.rfind("\n", 0, limit)
+            
+            # 3. Hard cut if no newline at all
+            if split_pos == -1:
                 split_pos = limit
 
             chunks.append(text[:split_pos])

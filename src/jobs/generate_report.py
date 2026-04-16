@@ -77,37 +77,30 @@ def main():
         logger.error(f"모듈 초기화 실패: {e}")
         return
 
-    # 3. 데이터 수집
-    logger.info("매크로/시장 폭 데이터 수집 중...")
+    # 3. 데이터 수집 (정해진 순서: 매크로 -> 상위종목 농축 -> 타겟종목)
+    logger.info("1. 매크로/시장 폭 데이터 수집 중...")
     macro_market_data = reader.fetch_macro_and_market_data()
+    macro_data = macro_market_data.get("normalized_macro_series")
+    
+    if not macro_data:
+        logger.error("매크로 데이터를 수집하지 못했습니다. 시황 분석 품질이 저하될 수 있습니다.")
 
-    logger.info(f"거래량 상위 종목 수집 중 (KOSPI/KOSDAQ/ETF 각 10개)...")
+    logger.info("2. 거래량 상위 종목 농축 수집 중 (KOSPI/KOSDAQ/ETF 각 10개)...")
     top_volume_data = reader.fetch_top_volume_stocks(limit=10)
-
-    # [방어 로직] top_volume_data 유효성 검사
     if not _validate_top_volume(top_volume_data):
-        logger.warning(
-            "[SKIP] top_volume_data가 비어 있습니다. "
-            "feature_store_daily에 volume 데이터가 없거나 날짜 조회 실패. "
-            "Stock Analysis 섹션을 스킵합니다."
-        )
+        logger.error("거래량 상위 종목 데이터를 수집하지 못했습니다. (Clean Skip 대상)")
         top_volume_data = None
 
-    logger.info(f"타겟 종목 데이터 수집 중 ({len(target_symbols)}개)...")
+    logger.info(f"3. 타겟 종목 데이터 수집 중 ({len(target_symbols)}개)...")
     if target_symbols:
         target_stocks_data = reader.fetch_target_stocks_data(target_symbols)
-        # [방어 로직] target_stocks_data 유효성 검사
         if not _validate_target_stocks(target_stocks_data):
-            logger.warning(
-                "[SKIP] target_stocks_data가 비어 있습니다. "
-                "해당 심볼에 대한 Supabase 데이터 없음."
-            )
+            logger.error("타겟 종목 데이터를 수집하지 못했습니다. (Clean Skip 대상)")
             target_stocks_data = {}
     else:
-        logger.warning("target_symbols 비어 있음. config/target_stocks.json 확인 필요.")
         target_stocks_data = {}
 
-    logger.info("뉴스 문서 수집 중...")
+    logger.info("4. 뉴스 문서 수집 중...")
     news_text = fetch_news_document()
 
     # KST 시간 계산
@@ -126,26 +119,24 @@ def main():
     # 4. 2단계 리포트 생성
     logger.info(f"STEP 1: Market Summary 생성 중 [{report_type}]...")
     market_summary_md = analyzer.generate_market_summary(
-        macro_data=macro_market_data.get("normalized_macro_series"),
+        macro_data=macro_data,
         market_breadth=macro_market_data.get("market_breadth_daily"),
         news_text=news_text,
         generation_time=generation_time_str,
         report_type=report_type,
     )
 
-    # [방어 로직] top_volume + target 모두 비어 있으면 Stock Analysis 스킵
+    # [방어 로직] 데이터가 없으면 Stock Analysis 스킵
     if top_volume_data is None and not target_stocks_data:
-        logger.warning(
-            "[SKIP] top_volume_data와 target_stocks_data 모두 비어 있어 "
-            "Stock Analysis 섹션 생성을 건너뜁니다."
-        )
-        stock_analysis_md = "_거래량 및 종목 데이터를 조회하지 못해 종목 분석이 생략되었습니다._"
+        logger.warning("모든 종목 데이터가 비어 있어 Stock Analysis 섹션을 생략합니다.")
+        stock_analysis_md = "_데이터 조회 실패로 인해 종목별 상세 분석이 생략되었습니다._"
     else:
         logger.info(f"STEP 2: Stock Analysis 생성 중 [{report_type}]...")
         stock_analysis_md = analyzer.generate_stock_analysis(
             market_summary=market_summary_md,
             top_volume_data=top_volume_data or {},
             target_stocks_data=target_stocks_data,
+            macro_data=macro_data, # 매크로 컨텍스트 추가 전달
             generation_time=generation_time_str,
             report_type=report_type,
         )

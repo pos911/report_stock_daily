@@ -145,15 +145,11 @@ class GeminiAnalyzer:
     # -------------------------------------------------------------------------
 
     def generate_stock_analysis(self, market_summary, top_volume_data,
-                                target_stocks_data, generation_time,
+                                target_stocks_data, macro_data, generation_time,
                                 report_type: str = "regular"):
         """
         [Step 2] 종목 심층 분석.
-
-        report_type:
-          - 'morning'  : 오늘 주목할 선매수 후보 발굴
-          - 'closing'  : 거래량이 터진 종목 중 외인 Z-Score 매집주 포착
-          - 'regular'  : 기본 퀀트 분석 + 3단계 개조식
+        'macro_data'를 추가로 수신하여 매크로 흐름과 종목 수급을 연계 분석함.
         """
         base_block = f"""
 [Report Generation Info]
@@ -163,74 +159,65 @@ class GeminiAnalyzer:
 [Market Summary Context]
 {market_summary}
 
-[Top Volume Stocks (KOSPI/KOSDAQ/ETF) — volume_value 키 포함]
+[Macro Data Context (normalized_macro_series)]
+{json.dumps(macro_data, indent=2, ensure_ascii=False)}
+
+[Top Volume Stocks (KOSPI/KOSDAQ/ETF) — enriched with zscore/per/pbr]
 {json.dumps(top_volume_data, indent=2, ensure_ascii=False)}
 
 [Target Stocks Data]
-데이터 포함: supply, fundamentals(market_cap/per/pbr), short selling, feature store(_1d_chg/_5d_chg)
+데이터 포함: supply, fundamentals, short selling, feature store
 {json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
 """
 
+        intelligent_instruction = """
+## [중요] 매크로-종목 통합 분석 지침 (Integrated Analysis)
+- **수급 Z-Score 해석**: 단순히 수치가 높다고 판단하지 말고, 함께 전달된 `Macro Data Context` (환율, 금리 trend)와 연계하라.
+- **시너지 분석 예시**:
+    - 환율이 급등(원화 약세) 중임에도 불구하고 외국인 수급 Z-Score가 높다면, 이는 환차손을 감수한 **매우 강력한 매집**으로 해석하라.
+    - 금리 상승기(미국채 금리 상승)에 고PER 성장주 중에서 외인 수급이 빠져나가는(Z-Score 음수) 종목이 있다면 리스크 관리 대상으로 경고하라.
+- **Regime 연계**: 현재 시장이 Risk-On 인지 Risk-Off 인지에 따라 중소형주(KOSDAQ)와 우량주(KOSPI)의 수급 강도를 다르게 평가하라.
+"""
+
         if report_type == "morning":
-            type_instruction = """
+            type_instruction = intelligent_instruction + """
 ## [Morning Report 07:00 KST] 종목 분석 가이드
 
 ### 분석 1 — 오늘 시초가 주목 종목 선별
-- 어제 종가 대비 `_1d_chg`가 큰 종목을 우선 선별하라.
-- 시초가에서 매수를 고려할 만한 모멘텀 종목을 근거와 함께 제시하라.
+- 어제 밤 미국 시장의 업종별 흐름과 연결하여 오늘 한국 시장에서 반사 이익이 예상되는 종목을 우선 선별하라.
 
 ### 분석 2 — 스마트 머니 선 포착 (Smart Money Detection) ⭐
-거래량 상위 종목 중 아래 두 조건을 **동시에** 충족하는 종목을 `<외인/기관 강한 매집 우량주>` 레이블로 특별 강조하라:
-- 조건 A: 외국인 수급 Z-Score(`foreign_net_zscore` 또는 유사 피처)가 **양수이고 높은 값**
-- 조건 B: PER 또는 PBR이 **시장 평균 대비 낮음** (밸류에이션 매력)
-조건 미충족 시 이 섹션 전체를 Silent Skip.
+거래량 상위 종목 중 [외인 수급 Z-Score 양수 + 저PER/PBR] 인 종목을 `<외인/기관 강한 매집 우량주>`로 특별 강조하라.
 
-### 분석 3 — 타겟 관심 종목 아침 브리핑
-각 종목별로 3단계 개조식 구조로 작성하라:
-1. 🔴 공격적인 포인트 (모멘텀, 수급 강도)
-2. 🔵 보수적인 포인트 (리스크, 하방 요소)
-3. ⚖️ 시초가 대응: **매수 접근 / 관망 / 회피**
-"""
-        elif report_type == "closing":
-            type_instruction = """
-## [Closing Report 15:30 KST] 종목 분석 가이드
-
-### 분석 1 — 오늘 거래량 폭발 종목 포착 (핵심)
-- `volume_value`가 높은 종목 중 오늘 특별히 거래량이 터진 종목을 식별하라.
-- 각 종목의 거래량 급증 원인(모멘텀, 뉴스, 수급)을 추정하여 서술하라.
-
-### 분석 2 — 외인 수급 Z-Score 매집주 포착 ⭐ (핵심)
-오늘 장 마감 기준, 거래량 상위 종목 중 아래 조건을 **동시에** 충족하는 종목을
-`<외인/기관 강한 매집 우량주>` 레이블로 반드시 별도 강조 섹션으로 작성하라:
-- 조건 A: `foreign_net_zscore` 또는 유사 외인 수급 Z-Score가 **양수이고 높은 값**
-- 조건 B: `per` 또는 `pbr`이 **낮아 밸류에이션 매력**이 있는 종목
-→ 이 종목들은 내일 추가 매수 가능성이 높은 스마트 머니 신호이다.
-조건 미충족 시 Silent Skip.
-
-### 분석 3 — 타겟 관심 종목 마감 결산
-각 종목별로 3단계 개조식 구조로 작성하라:
-1. 🔴 오늘 매수 근거 (수급, 모멘텀)
-2. 🔵 리스크 및 보수적 관점
-3. ⚖️ 내일 전략: **BUY / HOLD / SELL**
-"""
-        else:  # regular
-            type_instruction = """
-## [Regular Report] 종목 분석 가이드
-
-### 분석 1 — 거래량 상위 종목 퀀트 평가
-KOSPI / KOSDAQ / ETF 거래량 상위 종목의 퀀트 지표를 짧고 핵심만 평가하라.
-종목별로 소속 시장(KOSPI, KOSDAQ, ETF)을 명시하라.
-
-### 분석 2 — 스마트 머니 포착 ⭐
-외인 수급 Z-Score 높고 PER/PBR 낮은 종목을 `<외인/기관 강한 매집 우량주>`로 특별 언급.
-조건 미충족 시 Silent Skip.
-
-### 분석 3 — 타겟 관심 종목 심층 분석
-각 종목별로 3단계 개조식 구조로 작성하라:
+### 분석 3 — 타겟 관심 종목 아침 브리핑 (3단계 구조)
 1. 🔴 공격적인 포인트
 2. 🔵 보수적인 포인트
-3. ⚖️ 최종 결론: **BUY / HOLD / SELL**
+3. ⚖️ 시초가 대응 전략
 """
+        elif report_type == "closing":
+            type_instruction = intelligent_instruction + """
+## [Closing Report 15:30 KST] 종목 분석 가이드
+
+### 분석 1 — 오늘 거래량 및 수급 특징주
+- `volume_value`가 폭발하고 `foreign_flow_zscore`가 유의미하게 높은 종목을 식별하여 '오늘의 주인공'으로 분석하라.
+
+### 분석 2 — 외인 수급 Z-Score 매집주 포착 ⭐
+매크로 환경(환율 등)을 고려했을 때 외인이 '진정으로' 매집하고 있는 종목을 `<외인/기관 강한 매집 우량주>` 섹션으로 정리하라.
+
+### 분석 3 — 타겟 관심 종목 마감 결산 (3단계 구조)
+1. 🔴 오늘 매수 근거
+2. 🔵 리스크/보수적 관점
+3. ⚖️ 내일 전략 (BUY / HOLD / SELL)
+"""
+        else:  # regular
+            type_instruction = intelligent_instruction + """
+## [Regular Report] 종목 분석 가이드
+- 거래량 상위 종목의 퀀트 지표를 매크로 상황과 결합하여 평가하라.
+- 타겟 종목 분석 시 3단계 개조식 구조를 유지하라.
+"""
+
+        prompt = base_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
+        return self._call_model(prompt, temperature=0.7)
 
         prompt = base_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
         return self._call_model(prompt, temperature=0.7)

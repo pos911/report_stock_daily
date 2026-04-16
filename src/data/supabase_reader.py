@@ -164,68 +164,52 @@ class SupabaseReader:
 
     def fetch_top_volume_stocks(self, limit=10):
         """
-        feature_store_daily 기준 최신 날짜의 거래량 상위 종목 조회.
+        feature_store_daily 기준 최신 날짜의 거래량 상위 종목 조회 및 데이터 농축.
 
-        반환 구조 (종목당):
-          symbol, stock_name, market, volume_value, base_date
-
-        - KOSPI, KOSDAQ, ETF 각각 상위 limit개 (총 limit*3개)
-        - ETF 판별: 종목명에 ETF_PATTERN 정규식 매칭 시 강제 분류
+        1. 거래량 상위 종목 기호(symbols) 추출
+        2. 해당 기호들의 [foreign_flow_zscore, return_5d, moving_avg_20] (feature_store_daily)
+        3. 해당 기호들의 [per, pbr, market_cap] (fundamentals) - Join/Enrichment
         """
         # 1. stocks_master → symbol : name/market 맵
         try:
             resp = self.client.table("stocks_master").select("symbol, name, market").execute()
-            market_map = {}
-            name_map = {}
-            if resp.data:
-                for item in resp.data:
-                    name = item.get("name", "")
-                    market = item.get("market", "Unknown")
-                    if ETF_PATTERN.search(name):
-                        market = "ETF"
-                    market_map[item["symbol"]] = market
-                    name_map[item["symbol"]] = name
+            market_map = {item["symbol"]: item.get("market", "Unknown") for item in resp.data}
+            name_map = {item["symbol"]: item.get("name", "Unknown") for item in resp.data}
+            # ETF 판별 보정
+            for sym, name in name_map.items():
+                if ETF_PATTERN.search(name):
+                    market_map[sym] = "ETF"
         except Exception as e:
-            print(f"[ERROR] stocks_master 조회 실패 (top volume): {e}")
+            print(f"[ERROR] stocks_master 조회 실패: {e}")
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
         # 2. 기준 날짜
         latest_date = self.get_latest_date()
         if not latest_date:
-            print("[WARNING] fetch_top_volume_stocks: latest_date 조회 실패")
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
-        # 3. volume 피처 조회 → float 캐스팅 후 내림차순 정렬
+        # 3. volume 상위 추출
         try:
             vol_resp = (
-                self.client
-                .table("feature_store_daily")
+                self.client.table("feature_store_daily")
                 .select("symbol, feature_value")
                 .eq("base_date", latest_date)
                 .eq("feature_name", "volume")
                 .execute()
             )
-            if not vol_resp.data:
-                print(f"[WARNING] fetch_top_volume_stocks: {latest_date} 기준 volume 데이터 없음")
-                return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
-
-            sorted_vols = sorted(
-                vol_resp.data,
-                key=lambda x: float(x.get("feature_value") or 0),
-                reverse=True,
-            )
+            sorted_vols = sorted(vol_resp.data, key=lambda x: float(x.get("feature_value") or 0), reverse=True)
         except Exception as e:
-            print(f"[ERROR] volume 피처 조회 실패: {e}")
+            print(f"[ERROR] volume 조회 실패: {e}")
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
-        # 4. 시장별 상위 limit개 분류 (volume_value 키로 반환)
+        # 분류 및 심볼 리스트 추출
         result = {"KOSPI": [], "KOSDAQ": [], "ETF": []}
+        all_top_symbols = []
         for item in sorted_vols:
             sym = item["symbol"]
             market = market_map.get(sym)
-            if market not in result:
-                continue
-            if len(result[market]) < limit:
+            if market in result and len(result[market]) < limit:
+                all_top_symbols.append(sym)
                 result[market].append({
                     "symbol": sym,
                     "stock_name": name_map.get(sym, "Unknown"),
@@ -236,62 +220,107 @@ class SupabaseReader:
             if all(len(v) >= limit for v in result.values()):
                 break
 
+        if not all_top_symbols:
+            return result
+
+        # 4. 데이터 농축 (Enrichment)
+        # 4-1. feature_store_daily (zscore, return, ma)
+        try:
+            feat_resp = (
+                self.client.table("feature_store_daily")
+                .select("symbol, feature_name, feature_value")
+                .eq("base_date", latest_date)
+                .in_("symbol", all_top_symbols)
+                .in_("feature_name", ["foreign_flow_zscore", "return_5d", "moving_avg_20"])
+                .execute()
+            )
+            for m in feat_resp.data:
+                for k in result:
+                    for stock in result[k]:
+                        if stock["symbol"] == m["symbol"]:
+                            stock[m["feature_name"]] = float(m["feature_value"]) if m["feature_value"] is not None else None
+        except Exception as e:
+            print(f"[WARNING] Enrichment(features) 실패: {e}")
+
+        # 4-2. fundamentals (per, pbr, market_cap) - Fallback 포함
+        try:
+            try:
+                fund_resp = (
+                    self.client.table("normalized_stock_fundamentals_ratios")
+                    .select("symbol, per, pbr, market_cap")
+                    .eq("base_date", latest_date)
+                    .in_("symbol", all_top_symbols)
+                    .execute()
+                )
+            except Exception:
+                # market_cap 컬럼이 없을 경우 대비 fallback
+                fund_resp = (
+                    self.client.table("normalized_stock_fundamentals_ratios")
+                    .select("symbol, per, pbr")
+                    .eq("base_date", latest_date)
+                    .in_("symbol", all_top_symbols)
+                    .execute()
+                )
+            
+            for f in fund_resp.data:
+                for k in result:
+                    for stock in result[k]:
+                        if stock["symbol"] == f["symbol"]:
+                            stock.update({k: v for k, v in f.items() if k != "symbol"})
+        except Exception as e:
+            print(f"[WARNING] Enrichment(fundamentals) 실패: {e}")
+
         return result
 
     def fetch_target_stocks_data(self, target_symbols):
         """
-        타겟 종목 분석 데이터 수집.
-
-        포함 테이블:
-          - normalized_stock_short_selling
-          - normalized_stock_fundamentals_ratios  (market_cap, per, pbr 포함)
-          - normalized_stock_supply_daily
-          - feature_store_daily (모든 피처, _1d_chg/_5d_chg 포함)
+        타겟 종목 분석 데이터 수집 (Fundamentals Fallback 적용).
         """
         if not target_symbols:
             return {}
 
         name_map = self._fetch_stock_name_map()
         results = {}
-
-        # 기준 날짜: 단일 소스
         latest_date = self.get_latest_date()
         if not latest_date:
-            print("[WARNING] fetch_target_stocks_data: latest_date 조회 실패")
             return {}
 
-        # 분석 테이블 순회
-        stock_analysis_tables = [
-            "normalized_stock_short_selling",
-            "normalized_stock_fundamentals_ratios",  # market_cap, per, pbr 포함
-            "normalized_stock_supply_daily",
-        ]
-
-        for table in stock_analysis_tables:
+        # 1. Fundamentals (Fallback 적용)
+        try:
             try:
-                data_query = (
-                    self.client
-                    .table(table)
-                    .select("*")
+                fund_data = (
+                    self.client.table("normalized_stock_fundamentals_ratios")
+                    .select("symbol, per, pbr, market_cap, base_date")
                     .eq("base_date", latest_date)
                     .in_("symbol", target_symbols)
                     .execute()
                 )
+            except Exception:
+                fund_data = (
+                    self.client.table("normalized_stock_fundamentals_ratios")
+                    .select("symbol, per, pbr, base_date")
+                    .eq("base_date", latest_date)
+                    .in_("symbol", target_symbols)
+                    .execute()
+                )
+            results["normalized_stock_fundamentals_ratios"] = self._inject_stock_names(fund_data.data, name_map)
+        except Exception as e:
+            print(f"[WARNING] Fundamentals 조회 실패: {e}")
+            results["normalized_stock_fundamentals_ratios"] = []
+
+        # 2. 기타 분석 테이블
+        other_tables = ["normalized_stock_short_selling", "normalized_stock_supply_daily"]
+        for table in other_tables:
+            try:
+                data_query = self.client.table(table).select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
                 results[table] = self._inject_stock_names(data_query.data, name_map)
             except Exception as e:
                 print(f"[WARNING] {table} 조회 실패: {e}")
                 results[table] = []
 
-        # feature_store_daily: 전체 피처
+        # 3. feature_store_daily
         try:
-            feature_query = (
-                self.client
-                .table("feature_store_daily")
-                .select("*")
-                .eq("base_date", latest_date)
-                .in_("symbol", target_symbols)
-                .execute()
-            )
+            feature_query = self.client.table("feature_store_daily").select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
             results["feature_store_daily"] = self._inject_stock_names(feature_query.data, name_map)
         except Exception as e:
             print(f"[WARNING] feature_store_daily 조회 실패: {e}")
