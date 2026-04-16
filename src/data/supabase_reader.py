@@ -108,12 +108,12 @@ class SupabaseReader:
         반환 딕셔너리 구조:
           - 'normalized_macro_series'  : normalized_macro_series 테이블 최신 행
           - 'market_breadth_daily'     : market_breadth_daily 테이블 최신 행
-          - 'momentum'                 : feature_store_daily에서 macro_ 또는
-                                        _1d_chg/_5d_chg 피처 전체 (변화율)
+          - 'momentum'                 : feature_store_daily에서 symbol='GLOBAL'인
+                                         _1d_chg/_5d_chg/market_breadth 피처 전체
         """
         results = {}
 
-        # 1. normalized_macro_series (구 normalized_global_macro_daily → 변경)
+        # 1. normalized_macro_series
         try:
             macro_resp = (
                 self.client
@@ -136,8 +136,7 @@ class SupabaseReader:
         # 2. market_breadth_daily
         results["market_breadth_daily"] = self._fetch_and_ffill_timeseries("market_breadth_daily")
 
-        # 3. momentum 피처: feature_store_daily에서 macro_ 시작 또는 _1d_chg/_5d_chg 종결 피처
-        #    Supabase PostgREST는 OR 필터를 지원하므로 ilike 패턴 3개를 or() 로 결합
+        # 3. momentum 피처: feature_store_daily에서 symbol='GLOBAL'인 데이터 추출
         try:
             latest_date = self.get_latest_date()
             if latest_date:
@@ -146,10 +145,11 @@ class SupabaseReader:
                     .table("feature_store_daily")
                     .select("symbol, feature_name, feature_value, base_date")
                     .eq("base_date", latest_date)
+                    .eq("symbol", "GLOBAL")
                     .or_(
-                        "feature_name.ilike.macro_%,"
                         "feature_name.ilike.%_1d_chg,"
-                        "feature_name.ilike.%_5d_chg"
+                        "feature_name.ilike.%_5d_chg,"
+                        "feature_name.ilike.market_breadth%"
                     )
                     .execute()
                 )
@@ -157,7 +157,7 @@ class SupabaseReader:
             else:
                 results["momentum"] = []
         except Exception as e:
-            print(f"[WARNING] momentum 피처 조회 실패: {e}")
+            print(f"[WARNING] GLOBAL momentum 피처 조회 실패: {e}")
             results["momentum"] = []
 
         return results
@@ -309,10 +309,13 @@ class SupabaseReader:
             results["normalized_stock_fundamentals_ratios"] = []
 
         # 2. 기타 분석 테이블
-        other_tables = ["normalized_stock_short_selling", "normalized_stock_supply_daily"]
-        for table in other_tables:
+        other_tables_map = {
+            "normalized_stock_short_selling": "*",
+            "normalized_stock_supply_daily": "symbol, base_date, individual_net_buy, foreign_net_buy, institutional_net_buy, pension_net_buy, corporate_net_buy"
+        }
+        for table, select_query in other_tables_map.items():
             try:
-                data_query = self.client.table(table).select("*").eq("base_date", latest_date).in_("symbol", target_symbols).execute()
+                data_query = self.client.table(table).select(select_query).eq("base_date", latest_date).in_("symbol", target_symbols).execute()
                 results[table] = self._inject_stock_names(data_query.data, name_map)
             except Exception as e:
                 print(f"[WARNING] {table} 조회 실패: {e}")

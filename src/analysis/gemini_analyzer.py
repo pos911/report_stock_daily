@@ -65,15 +65,11 @@ class GeminiAnalyzer:
     # Step 1: Market Summary (시간대별 분기)
     # -------------------------------------------------------------------------
 
-    def generate_market_summary(self, macro_data, market_breadth, news_text,
+    def generate_market_summary(self, macro_data, market_breadth, momentum_data, news_text,
                                 generation_time, report_type: str = "regular"):
         """
         [Step 1] 매크로 시황 분석.
-
-        report_type:
-          - 'morning'  : 미국 야간 변화율 기반 Risk-On/Off + 시초가 대응 전략
-          - 'closing'  : 장 마감 후 거래량/외인 Z-Score 기반 매집주 포착
-          - 'regular'  : 기본 매크로 종합 분석
+        'momentum_data'를 추가 수신하여 글로벌 피처(GLOBAL)의 모멘텀 변화율을 분석함.
         """
         base_data_block = f"""
 [Report Generation Info]
@@ -86,54 +82,19 @@ class GeminiAnalyzer:
 [시장 폭 (market_breadth_daily)]
 {json.dumps(market_breadth, indent=2, ensure_ascii=False)}
 
-[모멘텀 변화율 피처 (feature_store_daily: macro_ / _1d_chg / _5d_chg)]
-※ 이 섹션의 데이터가 핵심입니다. 반드시 분석하세요.
+[모멘텀 변화율 피처 (feature_store_daily: symbol=GLOBAL)]
+{json.dumps(momentum_data, indent=2, ensure_ascii=False)}
 """
 
-        if report_type == "morning":
-            type_instruction = """
-## [Morning Report 07:00 KST] 핵심 분석 가이드
-
-### 필수 항목 1 — 미국 시장 야간 변화율 분석 (최우선)
-- `_1d_chg` (1일 변화율), `_5d_chg` (5일 변화율) 피처를 최우선으로 분석하라.
-- 특히 미국 주요 지수(S&P 500, NASDAQ, 다우), 달러인덱스(DXY), 미국채 10년물 금리의 변화율에 집중하라.
-- "어제 밤(미국 시간) 주요 자산의 움직임이 오늘 한국 시장에 어떤 영향을 줄 것인가"를 명확히 서술하라.
-
-### 필수 항목 2 — Risk-On / Risk-Off 체제 판정
-- 위 분석을 토대로 오늘 한국 시장이 **Risk-On** 인지 **Risk-Off** 인지 **반드시 단정하여** 명시하라.
-- 근거를 한 문장으로 요약하라. 예: "NASDAQ +1.8%, 달러 약세 → Risk-On 개장 예상"
-
-### 필수 항목 3 — 시초가 대응 전략
-- 오늘 코스피/코스닥 시초가 방향성(갭업/갭다운/보합)을 예측하고,
-  투자자가 시초가에서 취해야 할 구체적 대응 전략(매수 접근 또는 관망 등)을 제시하라.
-"""
-        elif report_type == "closing":
-            type_instruction = """
-## [Closing Report 15:30 KST] 핵심 분석 가이드
-
-### 필수 항목 1 — 오늘 장 마감 매크로 정리
-- 오늘 장 중 매크로 지표(환율, 금리, 상품가격 등)의 변화를 간결하게 요약하라.
-
-### 필수 항목 2 — Risk-On / Risk-Off 체제 평가
-- 오늘 장 마감 기준으로 **Risk-On** 인지 **Risk-Off** 인지 판정하고 근거를 명시하라.
-
-### 필수 항목 3 — 다음 날 시장 전망
-- 오늘 마감 데이터를 기반으로 내일 장 방향성과 주의해야 할 리스크 요인을 간략히 제시하라.
-"""
-        else:  # regular
-            type_instruction = """
-## [Regular Report] 종합 매크로 분석 가이드
-
-### 필수 항목 1 — 매크로 체제(Regime) 판단
-- 환율(USD/KRW)과 금리의 `_1d_chg`, `_5d_chg`를 최우선으로 분석하라.
-- **Risk-On** 또는 **Risk-Off** 체제를 반드시 명시하고 근거를 서술하라.
-
-### 필수 항목 2 — 거시경제 데이터 분석
-- 시장 방향성을 단순 수치 나열이 아닌 논리적 서사(narrative)로 작성하라.
+        type_instruction = f"""
+## [필수] 분석 가이드 (Global-to-Local Impact)
+1. **해외 주요 경제 뉴스 분석**: 아래 `[News Text from Google Docs]` 섹션의 내용은 **해외/미국 주요 경제 뉴스 및 글로벌 시황**이다. 이 정보가 가장 중요한 외부 변수임을 명심하라.
+2. **글로벌 모멘텀 결합**: 위 뉴스 텍스트와 `[모멘텀 변화율 피처]` 데이터(환율, 금리 등의 _1d_chg, _5d_chg)를 결합하여, 현재 글로벌 매크로 환경이 오늘 한국 시장에 미칠 구체적인 영향력을 서술하라.
+3. **Risk-On/Off 판정**: 해외 뉴스와 지표 변화율을 종합하여 현재 시장의 심리를 Risk-On 또는 Risk-Off로 명확히 판정하라.
 """
 
         news_block = f"""
-[News Text from Google Docs]
+[News Text from Google Docs] - 해외 주요 경제 뉴스 및 글로벌 시황
 {news_text}
 """
 
@@ -141,13 +102,12 @@ class GeminiAnalyzer:
         return self._call_model(prompt, temperature=0.7)
 
     # -------------------------------------------------------------------------
-    # Step 2: Stock Analysis (시간대별 분기)
+    # Step 2: Top Volume Analysis (기존 유지)
     # -------------------------------------------------------------------------
 
     def generate_top_volume_analysis(self, top_volume_data, report_type: str = "regular"):
         """
         [Step 2] 거래량 상위 종목 및 '스마트 머니' 전용 분석.
-        집중력 분산을 막기 위해 별도 메서드로 분리함.
         """
         prompt = f"""
 [Report Generation Info]
@@ -157,25 +117,27 @@ class GeminiAnalyzer:
 {json.dumps(top_volume_data, indent=2, ensure_ascii=False)}
 
 [System Instruction]
-거래량 상위 종목을 바탕으로 '스마트 머니'의 흐름을 날카롭게 포착하라. 
+거래량 상위 종목을 바탕으로 '스마트 머니'의 흐름을 포착하라.
 
-### 필히 포함되어야 할 분석 룰:
-1. **거래량 상위 종목 퀀트 평가**: KOSPI/KOSDAQ/ETF 별로 상위 종목들의 수급 강도와 기술적 상태(`moving_avg_20`, `return_5d`)를 짧고 강렬하게 평가하라.
-2. **스마트 머니 포착 (Smart Money Detection) ⭐**: 
-   - `foreign_flow_zscore`가 높고(양수), `per` 또는 `pbr`이 낮은 종목이 있다면 이를 `<외인/기관 강한 매집 우량주>`로 강력 추천 섹션으로 분류하라.
-   - 조건에 부합하는 종목이 전혀 없다면 이 분석 섹션 자체를 조용히 생략(Silent Skip)하라.
+### 분석 룰:
+1. **스마트 머니 포착 ⭐**: 
+   - `foreign_flow_zscore`가 높고, `per` 또는 `pbr`이 낮은 종목을 강조.
+   - 종목별로 소속 섹터가 현재 글로벌 매크로 트렌드(AI, 미국 국채 금리 민감도 등)와 부합하는지 짧게 언급하라.
 
 {self._build_silent_skip_rules()}
 마크다운 형식으로 작성해줘.
 """
         return self._call_model(prompt, temperature=0.7)
 
-    def generate_stock_analysis(self, market_summary, target_stocks_data, macro_data, generation_time,
+    def generate_stock_analysis(self, market_summary, target_stocks_data, macro_market_data, generation_time,
                                 report_type: str = "regular"):
         """
         [Step 3] 타겟 관심 종목 심층 분석.
-        오직 개별 타겟 종목에 대한 3단계 개조식 전략만 생성함.
+        'macro_market_data'를 수신하여 매크로/글로벌 시황과 연계 분석함.
         """
+        macro_data = macro_market_data.get("normalized_macro_series")
+        momentum_data = macro_market_data.get("momentum")
+
         base_block = f"""
 [Report Generation Info]
 - 작성 시간: {generation_time}
@@ -184,21 +146,22 @@ class GeminiAnalyzer:
 [Market Summary Context]
 {market_summary}
 
-[Macro Data Context (normalized_macro_series)]
-{json.dumps(macro_data, indent=2, ensure_ascii=False)}
+[Macro/Global Context Information]
+- Macro Series: {json.dumps(macro_data, indent=1, ensure_ascii=False)}
+- Global Momentum: {json.dumps(momentum_data, indent=1, ensure_ascii=False)}
 
-[Target Stocks Data]
+[Target Stocks Data - Supply/Fundamentals/Features]
 {json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
 """
 
         intelligent_instruction = """
 ## [중요] 타겟 종목 지능형 분석 지침
-- **매크로 연계 전략**: 현재의 `Macro Data Context`(환율, 금리 trend)를 바탕으로 각 종목의 대응 전략을 수립하라.
-  - 예: 고금리 유지 전망 시 부채비율이 높은 성장주는 보수적(SELL/HOLD)으로, 수출 비중이 높고 환율 수혜가 예상되는 종목은 공격적(BUY)으로 평가.
-- **3단계 개조식(Bullet points) 구조 강제**:
-  1. 🔴 공격적인 포인트 (매수 근거, 모멘텀, 수급 강도)
-  2. 🔵 보수적인 포인트 (리스크, 밸류에이션 부담, 하방 요소)
-  3. ⚖️ 최종 결론: **BUY / HOLD / SELL** (명확한 판단)
+1. **연기금 수급 해석**: `normalized_stock_supply_daily` 테이블에서 `pension_net_buy`가 유의미한 양수를 기록할 경우, 이를 **스마트 머니의 추세적 매집**으로 규정하고 긍정적 요인으로 분석하라.
+2. **글로벌 트렌드 연결**: 거래량 상위 종목이나 타겟 종목의 섹터(예: 반도체, 2차전지, 자동차)가 현재 해외 뉴스와 매크로 지표에서 나타나는 유망 섹터와 연결되는지 분석하라.
+3. **3단계 개조식 구조**:
+  1. 🔴 공격적인 포인트 (매수 근거, 모멘텀, 연기금/외인 수입)
+  2. 🔵 보수적인 포인트 (리스크, 글로벌 매크로 압박)
+  3. ⚖️ 최종 결론: **BUY / HOLD / SELL**
 """
 
         prompt = base_block + intelligent_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"

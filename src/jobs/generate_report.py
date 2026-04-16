@@ -127,6 +127,7 @@ def main():
     market_summary_md = analyzer.generate_market_summary(
         macro_data=macro_data,
         market_breadth=macro_market_data.get("market_breadth_daily"),
+        momentum_data=macro_market_data.get("momentum"),
         news_text=news_text,
         generation_time=generation_time_str,
         report_type=report_type,
@@ -150,7 +151,7 @@ def main():
         stock_analysis_md = analyzer.generate_stock_analysis(
             market_summary=market_summary_md,
             target_stocks_data=target_stocks_data,
-            macro_data=macro_data,
+            macro_market_data=macro_market_data,
             generation_time=generation_time_str,
             report_type=report_type,
         )
