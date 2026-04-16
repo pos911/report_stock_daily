@@ -14,15 +14,13 @@ class GeminiAnalyzer:
         Priority for API Key: 1. Env Var, 2. config/api_keys.json
         Priority for Settings: 1. analyzer_settings.json, 2. Env Vars, 3. Defaults
         """
-        # 1. Load API Key using unified config loader
         self.api_key = config.get("api_key", section="gemini")
-        
+
         if not self.api_key:
             raise ValueError("Gemini API Key must be provided via config/api_keys.json or GEMINI_API_KEY environment variable.")
 
         genai.configure(api_key=self.api_key)
 
-        # 2. Load Model Settings
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
         self.system_instruction = os.getenv("GEMINI_SYSTEM_INSTRUCTION")
 
@@ -33,129 +31,206 @@ class GeminiAnalyzer:
                 self.system_instruction = settings.get("system_instruction", self.system_instruction)
 
         if not self.system_instruction:
-            # Minimal fallback if no instruction provided
             self.system_instruction = "You are a financial analyst."
 
-        # Initialize the model with system instruction
         self.model = genai.GenerativeModel(
             model_name=self.model_name,
             system_instruction=self.system_instruction
         )
 
-    def generate_market_summary(self, macro_data, market_breadth, news_text, generation_time):
-        """
-        [Step 1] 매크로 체제(Regime) 분석 + 시장 시황 요약.
-        - 환율·금리의 1d/5d 변화율로 Risk-On / Risk-Off 체제를 명시.
-        - Silent Skip: 데이터 누락 시 언급 없이 해당 섹션 생략.
-        """
-        prompt = f"""
-[Report Generation Info]
-- 작성 시간: {generation_time}
+    # -------------------------------------------------------------------------
+    # Internal helpers
+    # -------------------------------------------------------------------------
 
-[거시 지표 / Market Breadth Data]
-{json.dumps({"macro_data": macro_data, "market_breadth": market_breadth}, indent=2, ensure_ascii=False)}
-
-[News Text from Google Docs]
-{news_text}
-
-[System Instruction]
-아래 규칙을 엄격하게 준수하여 거시경제 시황 섹션만 작성하라.
-
-## 필수 분석 규칙
-
-1. **매크로 체제(Regime) 판단 [최우선]**
-   - 환율(USD/KRW)과 금리(FRED: 미국채 10년물 등)의 `_1d_chg`(1일 변화율), `_5d_chg`(5일 변화율)을 최우선으로 분석하라.
-   - 이를 바탕으로 오늘 시장이 **Risk-On** 인지 **Risk-Off** 인지 반드시 명시하고, 그 근거를 간결하게 서술하라.
-   - 예: "환율 _1d_chg +0.8%, 금리 _5d_chg +12bp → Risk-Off 국면 진입"
-
-2. **거시경제 데이터 분석**
-   - 코스피/코스닥/선물옵션 시장의 전체적인 매크로 시황 분석
-   - 오직 거시경제(환율, 금리, 유가 등)와 뉴스 요약에 집중하라.
-   - 단순 값 나열이 아닌, 데이터가 의미하는 **향후 시장 방향성**을 논리적으로 서술하라.
-
-## 엄격 금지 사항 (Silent Skip 원칙)
-- 종목별 지표(PER, PBR, 수급, 공매도 등)나 개별 주식 언급 금지
-- "데이터가 없습니다", "데이터가 부족하여", "제공되지 않아" 등의 문구 절대 금지
-- 데이터가 없는 섹션이나 None/NaN 값은 **아무 언급 없이 조용히 생략(Silent Skip)**
-- 인사말/전체 서론/전체 결론 금지
-- `#`, `##` 최상위 마크다운 헤더 금지 (### 부터 사용)
-- If any requested data is missing, DO NOT mention it. Simply skip and analyze only what is available.
-
-마크다운 형식으로 작성해줘.
+    def _build_silent_skip_rules(self):
+        """공통 Silent Skip 규칙 텍스트 반환."""
+        return """
+## 공통 엄격 금지 사항 (Silent Skip 원칙)
+- "데이터가 없습니다", "데이터가 부족하여", "제공되지 않아", "N/A", "Not available" 등 절대 금지.
+- 데이터가 없는 섹션/지표/종목은 **아무 언급 없이 조용히 생략(Silent Skip)**.
+- 마크다운 최상위 헤더 `#`, `##` 금지 (### 부터 사용).
+- 인사말·전체 서론·전체 결론 금지 — 곧바로 본론만 출력.
+- If any metric or section has no data, do not mention it. Simply omit and analyze only what is available.
 """
+
+    def _call_model(self, prompt: str, temperature: float = 0.7) -> str:
+        """Gemini API 호출 공통 래퍼."""
         response = self.model.generate_content(
             contents=[{"role": "user", "parts": [{"text": prompt}]}],
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
-            ),
+            generation_config=genai.types.GenerationConfig(temperature=temperature),
         )
         return response.text
 
-    def generate_stock_analysis(self, market_summary, top_volume_data, target_stocks_data, generation_time):
+    # -------------------------------------------------------------------------
+    # Step 1: Market Summary (시간대별 분기)
+    # -------------------------------------------------------------------------
+
+    def generate_market_summary(self, macro_data, market_breadth, news_text,
+                                generation_time, report_type: str = "regular"):
         """
-        [Step 2] 종목 심층 분석.
-        - 스마트 머니 포착: 외인 수급 Z-Score 높고 PER/PBR 낮은 종목 특별 언급
-        - Silent Skip: 데이터 없는 섹션/지표 완전 생략
-        - 3단계 개조식 구조 강제
+        [Step 1] 매크로 시황 분석.
+
+        report_type:
+          - 'morning'  : 미국 야간 변화율 기반 Risk-On/Off + 시초가 대응 전략
+          - 'closing'  : 장 마감 후 거래량/외인 Z-Score 기반 매집주 포착
+          - 'regular'  : 기본 매크로 종합 분석
         """
-        prompt = f"""
+        base_data_block = f"""
 [Report Generation Info]
 - 작성 시간: {generation_time}
+- 리포트 유형: {report_type.upper()}
+
+[거시 지표 (normalized_macro_series)]
+{json.dumps(macro_data, indent=2, ensure_ascii=False)}
+
+[시장 폭 (market_breadth_daily)]
+{json.dumps(market_breadth, indent=2, ensure_ascii=False)}
+
+[모멘텀 변화율 피처 (feature_store_daily: macro_ / _1d_chg / _5d_chg)]
+※ 이 섹션의 데이터가 핵심입니다. 반드시 분석하세요.
+"""
+
+        if report_type == "morning":
+            type_instruction = """
+## [Morning Report 07:00 KST] 핵심 분석 가이드
+
+### 필수 항목 1 — 미국 시장 야간 변화율 분석 (최우선)
+- `_1d_chg` (1일 변화율), `_5d_chg` (5일 변화율) 피처를 최우선으로 분석하라.
+- 특히 미국 주요 지수(S&P 500, NASDAQ, 다우), 달러인덱스(DXY), 미국채 10년물 금리의 변화율에 집중하라.
+- "어제 밤(미국 시간) 주요 자산의 움직임이 오늘 한국 시장에 어떤 영향을 줄 것인가"를 명확히 서술하라.
+
+### 필수 항목 2 — Risk-On / Risk-Off 체제 판정
+- 위 분석을 토대로 오늘 한국 시장이 **Risk-On** 인지 **Risk-Off** 인지 **반드시 단정하여** 명시하라.
+- 근거를 한 문장으로 요약하라. 예: "NASDAQ +1.8%, 달러 약세 → Risk-On 개장 예상"
+
+### 필수 항목 3 — 시초가 대응 전략
+- 오늘 코스피/코스닥 시초가 방향성(갭업/갭다운/보합)을 예측하고,
+  투자자가 시초가에서 취해야 할 구체적 대응 전략(매수 접근 또는 관망 등)을 제시하라.
+"""
+        elif report_type == "closing":
+            type_instruction = """
+## [Closing Report 15:30 KST] 핵심 분석 가이드
+
+### 필수 항목 1 — 오늘 장 마감 매크로 정리
+- 오늘 장 중 매크로 지표(환율, 금리, 상품가격 등)의 변화를 간결하게 요약하라.
+
+### 필수 항목 2 — Risk-On / Risk-Off 체제 평가
+- 오늘 장 마감 기준으로 **Risk-On** 인지 **Risk-Off** 인지 판정하고 근거를 명시하라.
+
+### 필수 항목 3 — 다음 날 시장 전망
+- 오늘 마감 데이터를 기반으로 내일 장 방향성과 주의해야 할 리스크 요인을 간략히 제시하라.
+"""
+        else:  # regular
+            type_instruction = """
+## [Regular Report] 종합 매크로 분석 가이드
+
+### 필수 항목 1 — 매크로 체제(Regime) 판단
+- 환율(USD/KRW)과 금리의 `_1d_chg`, `_5d_chg`를 최우선으로 분석하라.
+- **Risk-On** 또는 **Risk-Off** 체제를 반드시 명시하고 근거를 서술하라.
+
+### 필수 항목 2 — 거시경제 데이터 분석
+- 시장 방향성을 단순 수치 나열이 아닌 논리적 서사(narrative)로 작성하라.
+"""
+
+        news_block = f"""
+[News Text from Google Docs]
+{news_text}
+"""
+
+        prompt = base_data_block + news_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
+        return self._call_model(prompt, temperature=0.7)
+
+    # -------------------------------------------------------------------------
+    # Step 2: Stock Analysis (시간대별 분기)
+    # -------------------------------------------------------------------------
+
+    def generate_stock_analysis(self, market_summary, top_volume_data,
+                                target_stocks_data, generation_time,
+                                report_type: str = "regular"):
+        """
+        [Step 2] 종목 심층 분석.
+
+        report_type:
+          - 'morning'  : 오늘 주목할 선매수 후보 발굴
+          - 'closing'  : 거래량이 터진 종목 중 외인 Z-Score 매집주 포착
+          - 'regular'  : 기본 퀀트 분석 + 3단계 개조식
+        """
+        base_block = f"""
+[Report Generation Info]
+- 작성 시간: {generation_time}
+- 리포트 유형: {report_type.upper()}
 
 [Market Summary Context]
 {market_summary}
 
-[Top Volume Stocks (KOSPI/KOSDAQ/ETF)]
+[Top Volume Stocks (KOSPI/KOSDAQ/ETF) — volume_value 키 포함]
 {json.dumps(top_volume_data, indent=2, ensure_ascii=False)}
 
 [Target Stocks Data]
 데이터 포함: supply, fundamentals(market_cap/per/pbr), short selling, feature store(_1d_chg/_5d_chg)
 {json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
+"""
 
-[System Instruction]
-앞서 분석된 시황(Market Summary Context)을 바탕으로 아래 내용을 수행하라.
-인사말이나 전체 서론, 결론은 절대 생성하지 말고 곧바로 본론(분석 내용)만 출력하라.
-파이썬 코드 단에서 타이틀을 조립하므로, `#`, `##` 최상위 마크다운 헤더는 생성하지 마라 (필요 시 ### 부터 사용).
+        if report_type == "morning":
+            type_instruction = """
+## [Morning Report 07:00 KST] 종목 분석 가이드
 
----
+### 분석 1 — 오늘 시초가 주목 종목 선별
+- 어제 종가 대비 `_1d_chg`가 큰 종목을 우선 선별하라.
+- 시초가에서 매수를 고려할 만한 모멘텀 종목을 근거와 함께 제시하라.
 
-### [분석 1] 거래량 상위 종목 퀀트 평가
+### 분석 2 — 스마트 머니 선 포착 (Smart Money Detection) ⭐
+거래량 상위 종목 중 아래 두 조건을 **동시에** 충족하는 종목을 `<외인/기관 강한 매집 우량주>` 레이블로 특별 강조하라:
+- 조건 A: 외국인 수급 Z-Score(`foreign_net_zscore` 또는 유사 피처)가 **양수이고 높은 값**
+- 조건 B: PER 또는 PBR이 **시장 평균 대비 낮음** (밸류에이션 매력)
+조건 미충족 시 이 섹션 전체를 Silent Skip.
+
+### 분석 3 — 타겟 관심 종목 아침 브리핑
+각 종목별로 3단계 개조식 구조로 작성하라:
+1. 🔴 공격적인 포인트 (모멘텀, 수급 강도)
+2. 🔵 보수적인 포인트 (리스크, 하방 요소)
+3. ⚖️ 시초가 대응: **매수 접근 / 관망 / 회피**
+"""
+        elif report_type == "closing":
+            type_instruction = """
+## [Closing Report 15:30 KST] 종목 분석 가이드
+
+### 분석 1 — 오늘 거래량 폭발 종목 포착 (핵심)
+- `volume_value`가 높은 종목 중 오늘 특별히 거래량이 터진 종목을 식별하라.
+- 각 종목의 거래량 급증 원인(모멘텀, 뉴스, 수급)을 추정하여 서술하라.
+
+### 분석 2 — 외인 수급 Z-Score 매집주 포착 ⭐ (핵심)
+오늘 장 마감 기준, 거래량 상위 종목 중 아래 조건을 **동시에** 충족하는 종목을
+`<외인/기관 강한 매집 우량주>` 레이블로 반드시 별도 강조 섹션으로 작성하라:
+- 조건 A: `foreign_net_zscore` 또는 유사 외인 수급 Z-Score가 **양수이고 높은 값**
+- 조건 B: `per` 또는 `pbr`이 **낮아 밸류에이션 매력**이 있는 종목
+→ 이 종목들은 내일 추가 매수 가능성이 높은 스마트 머니 신호이다.
+조건 미충족 시 Silent Skip.
+
+### 분석 3 — 타겟 관심 종목 마감 결산
+각 종목별로 3단계 개조식 구조로 작성하라:
+1. 🔴 오늘 매수 근거 (수급, 모멘텀)
+2. 🔵 리스크 및 보수적 관점
+3. ⚖️ 내일 전략: **BUY / HOLD / SELL**
+"""
+        else:  # regular
+            type_instruction = """
+## [Regular Report] 종목 분석 가이드
+
+### 분석 1 — 거래량 상위 종목 퀀트 평가
 KOSPI / KOSDAQ / ETF 거래량 상위 종목의 퀀트 지표를 짧고 핵심만 평가하라.
 종목별로 소속 시장(KOSPI, KOSDAQ, ETF)을 명시하라.
 
----
+### 분석 2 — 스마트 머니 포착 ⭐
+외인 수급 Z-Score 높고 PER/PBR 낮은 종목을 `<외인/기관 강한 매집 우량주>`로 특별 언급.
+조건 미충족 시 Silent Skip.
 
-### [분석 2] 스마트 머니 포착 (Smart Money Detection) ⭐
-거래량(Volume) 상위 종목 중 아래 두 조건을 **동시에** 충족하는 종목이 있다면 반드시 **특별 섹션**으로 강조 언급하라:
-- 조건 A: 외국인 수급 Z-Score(`foreign_net_zscore` 또는 유사 피처)가 **양수이고 높은 종목**
-- 조건 B: PER 또는 PBR이 **시장 평균 대비 낮은 종목** (밸류에이션 매력)
-
-해당 종목은 `<외인/기관 강한 매집 우량주>` 레이블로 별도 강조하라.
-조건을 충족하는 종목이 없으면 이 섹션 전체를 Silent Skip하라.
-
----
-
-### [분석 3] 타겟 관심 종목 심층 분석
-타겟 관심 종목(Target Stocks) 분석 시 나열식 설명을 완전히 폐기하고,
-반드시 종목별로 다음 **3단계 개조식(Bullet points)** 구조로만 답변하라:
-1. 🔴 공격적인 포인트 (매수 근거, 모멘텀, 수급 강도)
-2. 🔵 보수적인 포인트 (리스크, 밸류에이션 부담, 하방 요소)
-3. ⚖️ 최종 결론: **BUY / HOLD / SELL** (명확하게 단정 지을 것)
-
----
-
-## 엄격 금지 사항 (Silent Skip 원칙)
-- "현재 데이터가 제공되지 않아...", "데이터가 부족하여...", "N/A", "Not available" 등 절대 금지
-- 특정 지표(PER, PBR, Z-score, 수급 데이터 등)가 없으면 **그 지표 자체를 언급하지 말고** 있는 데이터만으로 분석
-- 분석 데이터가 없는 종목이나 섹션은 설명 없이 완전히 생략 (마크다운 제목조차 출력 금지)
-- If a specific metric is missing for a stock, completely omit any mention of that metric. Base analysis only on provided data.
-
-마크다운 형식으로 작성해줘.
+### 분석 3 — 타겟 관심 종목 심층 분석
+각 종목별로 3단계 개조식 구조로 작성하라:
+1. 🔴 공격적인 포인트
+2. 🔵 보수적인 포인트
+3. ⚖️ 최종 결론: **BUY / HOLD / SELL**
 """
-        response = self.model.generate_content(
-            contents=[{"role": "user", "parts": [{"text": prompt}]}],
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
-            ),
-        )
-        return response.text
+
+        prompt = base_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
+        return self._call_model(prompt, temperature=0.7)

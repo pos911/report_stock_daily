@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import datetime
 import logging
 from pathlib import Path
@@ -24,96 +25,115 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+VALID_REPORT_TYPES = ("morning", "closing", "regular")
+
+
+def _parse_args():
+    """CLI 인자 파싱. --type morning|closing|regular"""
+    parser = argparse.ArgumentParser(description="Daily Quant Report Generator")
+    parser.add_argument(
+        "--type",
+        dest="report_type",
+        choices=VALID_REPORT_TYPES,
+        default="regular",
+        help="리포트 유형: morning(07:00), closing(15:30), regular(기타). 기본값: regular",
+    )
+    return parser.parse_args()
+
 
 def _validate_top_volume(top_volume_data: dict) -> bool:
-    """
-    top_volume_data가 유효한지 검사.
-    KOSPI, KOSDAQ, ETF 모두 비어 있으면 False 반환.
-    """
+    """KOSPI/KOSDAQ/ETF 중 하나라도 데이터가 있으면 True."""
     if not top_volume_data:
         return False
-    has_any = any(isinstance(v, list) and len(v) > 0 for v in top_volume_data.values())
-    return has_any
+    return any(isinstance(v, list) and len(v) > 0 for v in top_volume_data.values())
 
 
 def _validate_target_stocks(target_stocks_data: dict) -> bool:
-    """
-    target_stocks_data가 유효한지 검사.
-    딕셔너리 자체가 비어 있거나, 모든 테이블에 데이터가 없으면 False 반환.
-    """
+    """하나 이상의 테이블에 데이터가 있으면 True."""
     if not target_stocks_data:
         return False
-    has_any = any(isinstance(v, list) and len(v) > 0 for v in target_stocks_data.values())
-    return has_any
+    return any(isinstance(v, list) and len(v) > 0 for v in target_stocks_data.values())
 
 
 def main():
-    logger.info("Starting daily report generation pipeline (Two-Step)...")
-    
-    # 1. Load target stocks
+    args = _parse_args()
+    report_type = args.report_type
+
+    logger.info(f"=== Daily Report Pipeline 시작 [type={report_type}] ===")
+
+    # 1. 타겟 종목 로드
     target_stocks_path = project_root / "config" / "target_stocks.json"
     target_symbols = []
     if target_stocks_path.exists():
         with open(target_stocks_path, "r", encoding="utf-8") as f:
             targets = json.load(f)
             target_symbols = [t["symbol"] for t in targets if t.get("enabled", True)]
-    
-    # 2. Initialize modules
+
+    # 2. 모듈 초기화
     try:
         reader = SupabaseReader()
         analyzer = GeminiAnalyzer()
     except Exception as e:
-        logger.error(f"Error initializing modules: {e}")
+        logger.error(f"모듈 초기화 실패: {e}")
         return
 
-    # 3. Fetch data (Separated concerns)
-    logger.info("Fetching macro & market breadth data from Supabase...")
+    # 3. 데이터 수집
+    logger.info("매크로/시장 폭 데이터 수집 중...")
     macro_market_data = reader.fetch_macro_and_market_data()
-    
-    logger.info("Fetching Top Volume Stocks (KOSPI/KOSDAQ/ETF, 각 10개)...")
+
+    logger.info(f"거래량 상위 종목 수집 중 (KOSPI/KOSDAQ/ETF 각 10개)...")
     top_volume_data = reader.fetch_top_volume_stocks(limit=10)
 
     # [방어 로직] top_volume_data 유효성 검사
     if not _validate_top_volume(top_volume_data):
         logger.warning(
             "[SKIP] top_volume_data가 비어 있습니다. "
-            "feature_store_daily에 데이터가 없거나 날짜 조회에 실패했을 수 있습니다. "
+            "feature_store_daily에 volume 데이터가 없거나 날짜 조회 실패. "
             "Stock Analysis 섹션을 스킵합니다."
         )
-        top_volume_data = None  # 하단에서 스킵 여부 판단
+        top_volume_data = None
 
-    logger.info(f"Fetching Target Stocks Data ({len(target_symbols)} symbols)...")
+    logger.info(f"타겟 종목 데이터 수집 중 ({len(target_symbols)}개)...")
     if target_symbols:
         target_stocks_data = reader.fetch_target_stocks_data(target_symbols)
         # [방어 로직] target_stocks_data 유효성 검사
         if not _validate_target_stocks(target_stocks_data):
             logger.warning(
                 "[SKIP] target_stocks_data가 비어 있습니다. "
-                "해당 심볼에 대한 데이터가 Supabase에 없을 수 있습니다."
+                "해당 심볼에 대한 Supabase 데이터 없음."
             )
             target_stocks_data = {}
     else:
-        logger.warning("target_symbols가 비어 있습니다. target_stocks.json을 확인하세요.")
+        logger.warning("target_symbols 비어 있음. config/target_stocks.json 확인 필요.")
         target_stocks_data = {}
 
-    logger.info("Fetching news from Google Docs...")
+    logger.info("뉴스 문서 수집 중...")
     news_text = fetch_news_document()
 
-    # Calculate KST time
+    # KST 시간 계산
     kst_tz = datetime.timezone(datetime.timedelta(hours=9))
     now_kst = datetime.datetime.now(kst_tz)
-    generation_time_str = now_kst.strftime('%Y-%m-%d %H:%M (KST)')
+    generation_time_str = now_kst.strftime("%Y-%m-%d %H:%M (KST)")
 
-    # 4. Generate Two-Step Report
-    logger.info("STEP 1: Generating Market Summary...")
+    # 리포트 유형별 타이틀 설정
+    type_label_map = {
+        "morning": "🌅 Morning Briefing (07:00 KST)",
+        "closing": "📊 Closing Analysis (15:30 KST)",
+        "regular": "📋 Regular Report",
+    }
+    report_label = type_label_map.get(report_type, "Daily Report")
+
+    # 4. 2단계 리포트 생성
+    logger.info(f"STEP 1: Market Summary 생성 중 [{report_type}]...")
     market_summary_md = analyzer.generate_market_summary(
-        macro_data=macro_market_data.get("normalized_global_macro_daily"),
+        macro_data=macro_market_data.get("normalized_macro_series"),
         market_breadth=macro_market_data.get("market_breadth_daily"),
         news_text=news_text,
-        generation_time=generation_time_str
+        generation_time=generation_time_str,
+        report_type=report_type,
     )
 
-    # [방어 로직] top_volume_data 또는 target_stocks_data가 없으면 Stock Analysis 스킵
+    # [방어 로직] top_volume + target 모두 비어 있으면 Stock Analysis 스킵
     if top_volume_data is None and not target_stocks_data:
         logger.warning(
             "[SKIP] top_volume_data와 target_stocks_data 모두 비어 있어 "
@@ -121,17 +141,18 @@ def main():
         )
         stock_analysis_md = "_거래량 및 종목 데이터를 조회하지 못해 종목 분석이 생략되었습니다._"
     else:
-        logger.info("STEP 2: Generating Stock Analysis...")
+        logger.info(f"STEP 2: Stock Analysis 생성 중 [{report_type}]...")
         stock_analysis_md = analyzer.generate_stock_analysis(
             market_summary=market_summary_md,
             top_volume_data=top_volume_data or {},
             target_stocks_data=target_stocks_data,
-            generation_time=generation_time_str
+            generation_time=generation_time_str,
+            report_type=report_type,
         )
 
-    # Combine report with well-structured headers (assembly logic)
+    # 최종 리포트 조립
     final_report = (
-        f"# Daily Quant Report\n"
+        f"# Daily Quant Report — {report_label}\n"
         f"> **Generated at**: {generation_time_str}\n\n"
         f"## 1. Market Summary\n\n"
         f"{market_summary_md.strip()}\n\n"
@@ -140,28 +161,29 @@ def main():
         f"{stock_analysis_md.strip()}"
     )
 
-    # 5. Save report
+    # 5. 리포트 저장
     reports_dir = project_root / "reports"
     reports_dir.mkdir(exist_ok=True)
 
-    file_name = f"daily_quant_report_{now_kst.strftime('%Y%m%d_%H%M')}.md"
+    file_name = f"daily_quant_report_{report_type}_{now_kst.strftime('%Y%m%d_%H%M')}.md"
     file_path = reports_dir / file_name
 
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(final_report)
 
-    logger.info(f"Report successfully saved to: {file_path}")
+    logger.info(f"리포트 저장 완료: {file_path}")
 
-    # 6. Send report via Telegram
+    # 6. 텔레그램 발송
     try:
         sender = TelegramSender()
         sent = sender.send_report(final_report)
         if sent:
-            logger.info("Telegram notification sent successfully.")
+            logger.info("텔레그램 발송 성공.")
         else:
-            logger.warning("Telegram notification request completed, but delivery failed.")
+            logger.warning("텔레그램 발송 요청 완료, 전달 실패.")
     except Exception as e:
-        logger.warning(f"Telegram notification failed (non-fatal): {e}")
+        logger.warning(f"텔레그램 발송 실패 (non-fatal): {e}")
+
 
 if __name__ == "__main__":
     main()
