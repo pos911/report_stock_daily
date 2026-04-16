@@ -82,7 +82,7 @@ class SupabaseReader:
             results[table] = self._fetch_and_ffill_timeseries(table)
         return results
 
-    def fetch_top_volume_stocks(self, limit=20):
+    def fetch_top_volume_stocks(self, limit=10):
         """
         Fetches top volume stocks for KOSPI, KOSDAQ, and ETF based on the latest available data.
         """
@@ -92,9 +92,17 @@ class SupabaseReader:
             market_map = {}
             name_map = {}
             if resp.data:
+                etf_keywords = ["KODEX", "TIGER", "KBSTAR", "KINDEX", "ARIRANG", "KOSEF"]
                 for item in resp.data:
-                    market_map[item["symbol"]] = item.get("market", "Unknown")
-                    name_map[item["symbol"]] = item["name"]
+                    market = item.get("market", "Unknown")
+                    name = item["name"]
+                    
+                    # Enhanced ETF classification logic based on stock name
+                    if any(keyword in name for keyword in etf_keywords):
+                        market = "ETF"
+                        
+                    market_map[item["symbol"]] = market
+                    name_map[item["symbol"]] = name
         except Exception as e:
             print(f"Error fetching stock master for top volume: {e}")
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
@@ -112,7 +120,13 @@ class SupabaseReader:
             if not vol_query.data:
                 return result
                 
-            sorted_vols = sorted(vol_query.data, key=lambda x: float(x.get("feature_value", 0)), reverse=True)
+            # Safely cast feature_value to float for sorting
+            sorted_vols = sorted(
+                vol_query.data, 
+                key=lambda x: float(x.get("feature_value") if x.get("feature_value") is not None else 0), 
+                reverse=True
+            )
+            
             for item in sorted_vols:
                 sym = item["symbol"]
                 market = market_map.get(sym)
@@ -122,7 +136,7 @@ class SupabaseReader:
                         "symbol": sym,
                         "stock_name": name_map.get(sym, "Unknown"),
                         "market": market,
-                        "volume": item["feature_value"]
+                        "volume": float(item["feature_value"]) if item.get("feature_value") is not None else 0.0
                     })
             return result
         except Exception as e:
