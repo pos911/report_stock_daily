@@ -116,7 +116,13 @@ def main():
     }
     report_label = type_label_map.get(report_type, "Daily Report")
 
-    # 4. 2단계 리포트 생성
+    # 4. 3단계 리포트 생성 (Assembly)
+    report_content = (
+        f"# Daily Quant Report — {report_label}\n"
+        f"> **Generated at**: {generation_time_str}\n\n"
+    )
+
+    # 4-1. STEP 1: Market Summary
     logger.info(f"STEP 1: Market Summary 생성 중 [{report_type}]...")
     market_summary_md = analyzer.generate_market_summary(
         macro_data=macro_data,
@@ -125,32 +131,32 @@ def main():
         generation_time=generation_time_str,
         report_type=report_type,
     )
+    report_content += f"## 1. Market Summary\n\n{market_summary_md.strip()}\n\n---\n\n"
 
-    # [방어 로직] 데이터가 없으면 Stock Analysis 스킵
-    if top_volume_data is None and not target_stocks_data:
-        logger.warning("모든 종목 데이터가 비어 있어 Stock Analysis 섹션을 생략합니다.")
-        stock_analysis_md = "_데이터 조회 실패로 인해 종목별 상세 분석이 생략되었습니다._"
+    # 4-2. STEP 2: Top Volume Analysis (신규 분리 메서드)
+    if top_volume_data:
+        logger.info(f"STEP 2: Top Volume & Smart Money 분석 중...")
+        top_volume_md = analyzer.generate_top_volume_analysis(
+            top_volume_data=top_volume_data,
+            report_type=report_type
+        )
+        report_content += f"## 2. Top Volume & Smart Money\n\n{top_volume_md.strip()}\n\n---\n\n"
     else:
-        logger.info(f"STEP 2: Stock Analysis 생성 중 [{report_type}]...")
+        logger.warning("거래량 데이터 부재로 STEP 2를 건너뜁니다.")
+
+    # 4-3. STEP 3: Target Stock Analysis
+    if target_stocks_data:
+        logger.info(f"STEP 3: Target Stock 상세 분석 중...")
         stock_analysis_md = analyzer.generate_stock_analysis(
             market_summary=market_summary_md,
-            top_volume_data=top_volume_data or {},
             target_stocks_data=target_stocks_data,
-            macro_data=macro_data, # 매크로 컨텍스트 추가 전달
+            macro_data=macro_data,
             generation_time=generation_time_str,
             report_type=report_type,
         )
-
-    # 최종 리포트 조립
-    final_report = (
-        f"# Daily Quant Report — {report_label}\n"
-        f"> **Generated at**: {generation_time_str}\n\n"
-        f"## 1. Market Summary\n\n"
-        f"{market_summary_md.strip()}\n\n"
-        f"---\n\n"
-        f"## 2. Stock Analysis & Strategy\n\n"
-        f"{stock_analysis_md.strip()}"
-    )
+        report_content += f"## 3. Stock Analysis & Strategy\n\n{stock_analysis_md.strip()}"
+    else:
+        logger.warning("타겟 종목 데이터 부재로 STEP 3을 건너뜁니다.")
 
     # 5. 리포트 저장
     reports_dir = project_root / "reports"
@@ -160,14 +166,14 @@ def main():
     file_path = reports_dir / file_name
 
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(final_report)
+        f.write(report_content)
 
     logger.info(f"리포트 저장 완료: {file_path}")
 
     # 6. 텔레그램 발송
     try:
         sender = TelegramSender()
-        sent = sender.send_report(final_report)
+        sent = sender.send_report(report_content)
         if sent:
             logger.info("텔레그램 발송 성공.")
         else:

@@ -144,12 +144,37 @@ class GeminiAnalyzer:
     # Step 2: Stock Analysis (시간대별 분기)
     # -------------------------------------------------------------------------
 
-    def generate_stock_analysis(self, market_summary, top_volume_data,
-                                target_stocks_data, macro_data, generation_time,
+    def generate_top_volume_analysis(self, top_volume_data, report_type: str = "regular"):
+        """
+        [Step 2] 거래량 상위 종목 및 '스마트 머니' 전용 분석.
+        집중력 분산을 막기 위해 별도 메서드로 분리함.
+        """
+        prompt = f"""
+[Report Generation Info]
+- 리포트 유형: {report_type.upper()}
+
+[Top Volume Stocks (KOSPI/KOSDAQ/ETF) — enriched with zscore/per/pbr]
+{json.dumps(top_volume_data, indent=2, ensure_ascii=False)}
+
+[System Instruction]
+거래량 상위 종목을 바탕으로 '스마트 머니'의 흐름을 날카롭게 포착하라. 
+
+### 필히 포함되어야 할 분석 룰:
+1. **거래량 상위 종목 퀀트 평가**: KOSPI/KOSDAQ/ETF 별로 상위 종목들의 수급 강도와 기술적 상태(`moving_avg_20`, `return_5d`)를 짧고 강렬하게 평가하라.
+2. **스마트 머니 포착 (Smart Money Detection) ⭐**: 
+   - `foreign_flow_zscore`가 높고(양수), `per` 또는 `pbr`이 낮은 종목이 있다면 이를 `<외인/기관 강한 매집 우량주>`로 강력 추천 섹션으로 분류하라.
+   - 조건에 부합하는 종목이 전혀 없다면 이 분석 섹션 자체를 조용히 생략(Silent Skip)하라.
+
+{self._build_silent_skip_rules()}
+마크다운 형식으로 작성해줘.
+"""
+        return self._call_model(prompt, temperature=0.7)
+
+    def generate_stock_analysis(self, market_summary, target_stocks_data, macro_data, generation_time,
                                 report_type: str = "regular"):
         """
-        [Step 2] 종목 심층 분석.
-        'macro_data'를 추가로 수신하여 매크로 흐름과 종목 수급을 연계 분석함.
+        [Step 3] 타겟 관심 종목 심층 분석.
+        오직 개별 타겟 종목에 대한 3단계 개조식 전략만 생성함.
         """
         base_block = f"""
 [Report Generation Info]
@@ -162,61 +187,21 @@ class GeminiAnalyzer:
 [Macro Data Context (normalized_macro_series)]
 {json.dumps(macro_data, indent=2, ensure_ascii=False)}
 
-[Top Volume Stocks (KOSPI/KOSDAQ/ETF) — enriched with zscore/per/pbr]
-{json.dumps(top_volume_data, indent=2, ensure_ascii=False)}
-
 [Target Stocks Data]
-데이터 포함: supply, fundamentals, short selling, feature store
 {json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
 """
 
         intelligent_instruction = """
-## [중요] 매크로-종목 통합 분석 지침 (Integrated Analysis)
-- **수급 Z-Score 해석**: 단순히 수치가 높다고 판단하지 말고, 함께 전달된 `Macro Data Context` (환율, 금리 trend)와 연계하라.
-- **시너지 분석 예시**:
-    - 환율이 급등(원화 약세) 중임에도 불구하고 외국인 수급 Z-Score가 높다면, 이는 환차손을 감수한 **매우 강력한 매집**으로 해석하라.
-    - 금리 상승기(미국채 금리 상승)에 고PER 성장주 중에서 외인 수급이 빠져나가는(Z-Score 음수) 종목이 있다면 리스크 관리 대상으로 경고하라.
-- **Regime 연계**: 현재 시장이 Risk-On 인지 Risk-Off 인지에 따라 중소형주(KOSDAQ)와 우량주(KOSPI)의 수급 강도를 다르게 평가하라.
+## [중요] 타겟 종목 지능형 분석 지침
+- **매크로 연계 전략**: 현재의 `Macro Data Context`(환율, 금리 trend)를 바탕으로 각 종목의 대응 전략을 수립하라.
+  - 예: 고금리 유지 전망 시 부채비율이 높은 성장주는 보수적(SELL/HOLD)으로, 수출 비중이 높고 환율 수혜가 예상되는 종목은 공격적(BUY)으로 평가.
+- **3단계 개조식(Bullet points) 구조 강제**:
+  1. 🔴 공격적인 포인트 (매수 근거, 모멘텀, 수급 강도)
+  2. 🔵 보수적인 포인트 (리스크, 밸류에이션 부담, 하방 요소)
+  3. ⚖️ 최종 결론: **BUY / HOLD / SELL** (명확한 판단)
 """
 
-        if report_type == "morning":
-            type_instruction = intelligent_instruction + """
-## [Morning Report 07:00 KST] 종목 분석 가이드
-
-### 분석 1 — 오늘 시초가 주목 종목 선별
-- 어제 밤 미국 시장의 업종별 흐름과 연결하여 오늘 한국 시장에서 반사 이익이 예상되는 종목을 우선 선별하라.
-
-### 분석 2 — 스마트 머니 선 포착 (Smart Money Detection) ⭐
-거래량 상위 종목 중 [외인 수급 Z-Score 양수 + 저PER/PBR] 인 종목을 `<외인/기관 강한 매집 우량주>`로 특별 강조하라.
-
-### 분석 3 — 타겟 관심 종목 아침 브리핑 (3단계 구조)
-1. 🔴 공격적인 포인트
-2. 🔵 보수적인 포인트
-3. ⚖️ 시초가 대응 전략
-"""
-        elif report_type == "closing":
-            type_instruction = intelligent_instruction + """
-## [Closing Report 15:30 KST] 종목 분석 가이드
-
-### 분석 1 — 오늘 거래량 및 수급 특징주
-- `volume_value`가 폭발하고 `foreign_flow_zscore`가 유의미하게 높은 종목을 식별하여 '오늘의 주인공'으로 분석하라.
-
-### 분석 2 — 외인 수급 Z-Score 매집주 포착 ⭐
-매크로 환경(환율 등)을 고려했을 때 외인이 '진정으로' 매집하고 있는 종목을 `<외인/기관 강한 매집 우량주>` 섹션으로 정리하라.
-
-### 분석 3 — 타겟 관심 종목 마감 결산 (3단계 구조)
-1. 🔴 오늘 매수 근거
-2. 🔵 리스크/보수적 관점
-3. ⚖️ 내일 전략 (BUY / HOLD / SELL)
-"""
-        else:  # regular
-            type_instruction = intelligent_instruction + """
-## [Regular Report] 종목 분석 가이드
-- 거래량 상위 종목의 퀀트 지표를 매크로 상황과 결합하여 평가하라.
-- 타겟 종목 분석 시 3단계 개조식 구조를 유지하라.
-"""
-
-        prompt = base_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
+        prompt = base_block + intelligent_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
         return self._call_model(prompt, temperature=0.7)
 
         prompt = base_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
