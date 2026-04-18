@@ -219,6 +219,11 @@ class SupabaseReader:
         try:
             latest_macro_date = self._get_latest_base_date_available("normalized_macro_series", as_of_utc)
             results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date)
+            latest_macro_date = self._get_latest_base_date("normalized_macro_series")
+            results["normalized_macro_series"] = self._fetch_latest_row_by_date(
+                "normalized_macro_series",
+                latest_macro_date,
+            )
         except Exception as e:
             print(f"[WARNING] normalized_macro_series 조회 실패: {e}")
             results["normalized_macro_series"] = None
@@ -226,6 +231,7 @@ class SupabaseReader:
         # 1-b. normalized_global_macro_daily (consumer spec 핵심)
         try:
             latest_global_macro_date = self._get_latest_base_date_available("normalized_global_macro_daily", as_of_utc)
+            latest_global_macro_date = self._get_latest_base_date("normalized_global_macro_daily")
             results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
                 "normalized_global_macro_daily",
                 latest_global_macro_date,
@@ -237,6 +243,7 @@ class SupabaseReader:
         # 2. market_breadth_daily
         try:
             latest_breadth_date = self._get_latest_base_date_available("market_breadth_daily", as_of_utc)
+            latest_breadth_date = self._get_latest_base_date("market_breadth_daily")
             results["market_breadth_daily"] = self._fetch_latest_row_by_date(
                 "market_breadth_daily",
                 latest_breadth_date,
@@ -281,6 +288,7 @@ class SupabaseReader:
         kst_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
         kst_today = kst_now.date()
         as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        kst_today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
         table_names = [
             "normalized_stock_prices_daily",
             "normalized_stock_supply_daily",
@@ -295,6 +303,7 @@ class SupabaseReader:
         lag_days_by_table = {}
         for table_name in table_names:
             latest_date = self._get_latest_base_date_available(table_name, as_of_utc)
+            latest_date = self._get_latest_base_date(table_name)
             latest_by_table[table_name] = latest_date
             if latest_date:
                 try:
@@ -393,6 +402,9 @@ class SupabaseReader:
                 self.client.table("pipeline_run_logs")
                 .select("job_name, target_date, status, records_processed, error_message")
                 .gte("target_date", recent_from)
+            logs_resp = (
+                self.client.table("pipeline_run_logs")
+                .select("job_name, target_date, status, records_processed, error_message")
                 .order("target_date", desc=True)
                 .limit(120)
                 .execute()
@@ -407,6 +419,7 @@ class SupabaseReader:
 
         return {
             "as_of_kst_datetime": kst_now.isoformat(),
+            "as_of_kst_date": kst_today.isoformat(),
             "latest_base_date_by_table": latest_by_table,
             "lag_days_by_table": lag_days_by_table,
             "zero_volume_guardrail": zero_volume,
