@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -76,6 +77,42 @@ class SupabaseReader:
                 item["stock_name"] = name_map[symbol]
         return data
 
+    def _get_latest_base_date(self, table_name: str):
+        """테이블별 최신 base_date를 조회한다."""
+        try:
+            resp = (
+                self.client.table(table_name)
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]["base_date"]
+        except Exception as e:
+            print(f"[WARNING] _get_latest_base_date({table_name}) 실패: {e}")
+        return None
+
+    def _fetch_latest_row_by_date(self, table_name: str, base_date: str):
+        """지정한 base_date 행을 조회하고 forward fill 후 마지막 레코드를 반환한다."""
+        if not base_date:
+            return None
+        try:
+            resp = (
+                self.client.table(table_name)
+                .select("*")
+                .eq("base_date", base_date)
+                .execute()
+            )
+            if not resp.data:
+                return None
+            df = pd.DataFrame(resp.data).sort_values("base_date")
+            df = df.ffill()
+            return df.iloc[-1].to_dict()
+        except Exception as e:
+            print(f"[WARNING] _fetch_latest_row_by_date({table_name}, {base_date}) 실패: {e}")
+            return None
+
     def get_latest_date(self):
         """
         feature_store_daily 테이블에서 feature_name='volume' 기준으로
@@ -115,26 +152,36 @@ class SupabaseReader:
 
         # 1. normalized_macro_series
         try:
-            macro_resp = (
-                self.client
-                .table("normalized_macro_series")
-                .select("*")
-                .order("base_date", desc=True)
-                .limit(10)
-                .execute()
+            latest_macro_date = self._get_latest_base_date("normalized_macro_series")
+            results["normalized_macro_series"] = self._fetch_latest_row_by_date(
+                "normalized_macro_series",
+                latest_macro_date,
             )
-            if macro_resp.data:
-                df = pd.DataFrame(macro_resp.data).sort_values("base_date")
-                df = df.ffill()
-                results["normalized_macro_series"] = df.iloc[-1].to_dict()
-            else:
-                results["normalized_macro_series"] = None
         except Exception as e:
             print(f"[WARNING] normalized_macro_series 조회 실패: {e}")
             results["normalized_macro_series"] = None
 
+        # 1-b. normalized_global_macro_daily (consumer spec 핵심)
+        try:
+            latest_global_macro_date = self._get_latest_base_date("normalized_global_macro_daily")
+            results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
+                "normalized_global_macro_daily",
+                latest_global_macro_date,
+            )
+        except Exception as e:
+            print(f"[WARNING] normalized_global_macro_daily 조회 실패: {e}")
+            results["normalized_global_macro_daily"] = None
+
         # 2. market_breadth_daily
-        results["market_breadth_daily"] = self._fetch_and_ffill_timeseries("market_breadth_daily")
+        try:
+            latest_breadth_date = self._get_latest_base_date("market_breadth_daily")
+            results["market_breadth_daily"] = self._fetch_latest_row_by_date(
+                "market_breadth_daily",
+                latest_breadth_date,
+            )
+        except Exception as e:
+            print(f"[WARNING] market_breadth_daily 조회 실패: {e}")
+            results["market_breadth_daily"] = None
 
         # 3. momentum 피처: feature_store_daily에서 symbol='GLOBAL'인 데이터 추출
         try:
@@ -161,6 +208,144 @@ class SupabaseReader:
             results["momentum"] = []
 
         return results
+
+    def fetch_data_quality_guardrails(self):
+        """
+        소비자 규격 기반 데이터 품질 가드레일 요약:
+        1) zero_volume_pct 급증 추적
+        2) 테이블별 최신일 lag_days
+        3) pipeline_run_logs WARN/FAIL 탐지
+        """
+        kst_today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
+        table_names = [
+            "normalized_stock_prices_daily",
+            "normalized_stock_supply_daily",
+            "normalized_stock_fundamentals_ratios",
+            "normalized_global_macro_daily",
+            "market_breadth_daily",
+            "normalized_derivatives_daily",
+            "feature_store_daily",
+        ]
+
+        latest_by_table = {}
+        lag_days_by_table = {}
+        for table_name in table_names:
+            latest_date = self._get_latest_base_date(table_name)
+            latest_by_table[table_name] = latest_date
+            if latest_date:
+                try:
+                    lag_days_by_table[table_name] = max(
+                        0,
+                        (kst_today - datetime.date.fromisoformat(str(latest_date))).days,
+                    )
+                except Exception:
+                    lag_days_by_table[table_name] = None
+            else:
+                lag_days_by_table[table_name] = None
+
+        zero_volume = {
+            "latest_base_date": None,
+            "previous_base_date": None,
+            "latest_zero_volume_pct": None,
+            "previous_zero_volume_pct": None,
+            "delta_pct": None,
+        }
+        try:
+            date_rows = (
+                self.client.table("normalized_stock_prices_daily")
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(12)
+                .execute()
+            )
+            distinct_dates = []
+            for row in date_rows.data or []:
+                d = row.get("base_date")
+                if d and d not in distinct_dates:
+                    distinct_dates.append(d)
+                if len(distinct_dates) >= 2:
+                    break
+
+            if len(distinct_dates) >= 2:
+                latest_d, prev_d = distinct_dates[0], distinct_dates[1]
+                universe_resp = self.client.table("stocks_master").select("symbol, is_active").execute()
+                active_symbols = {
+                    item["symbol"]
+                    for item in (universe_resp.data or [])
+                    if item.get("is_active") is True
+                }
+
+                price_resp = (
+                    self.client.table("normalized_stock_prices_daily")
+                    .select("symbol, base_date, volume")
+                    .in_("base_date", [latest_d, prev_d])
+                    .execute()
+                )
+                latest_rows = []
+                prev_rows = []
+                for row in price_resp.data or []:
+                    symbol = row.get("symbol")
+                    if active_symbols and symbol not in active_symbols:
+                        continue
+                    if row.get("base_date") == latest_d:
+                        latest_rows.append(row)
+                    elif row.get("base_date") == prev_d:
+                        prev_rows.append(row)
+
+                def calc_zero_pct(rows):
+                    if not rows:
+                        return None
+                    zero_count = 0
+                    total_count = 0
+                    for r in rows:
+                        vol = r.get("volume")
+                        try:
+                            v = float(vol) if vol is not None else 0.0
+                        except Exception:
+                            v = 0.0
+                        if v <= 0:
+                            zero_count += 1
+                        total_count += 1
+                    return round((zero_count / total_count) * 100, 2) if total_count else None
+
+                latest_pct = calc_zero_pct(latest_rows)
+                prev_pct = calc_zero_pct(prev_rows)
+                delta = round(latest_pct - prev_pct, 2) if latest_pct is not None and prev_pct is not None else None
+
+                zero_volume = {
+                    "latest_base_date": latest_d,
+                    "previous_base_date": prev_d,
+                    "latest_zero_volume_pct": latest_pct,
+                    "previous_zero_volume_pct": prev_pct,
+                    "delta_pct": delta,
+                }
+        except Exception as e:
+            print(f"[WARNING] zero_volume_pct 계산 실패: {e}")
+
+        log_alerts = []
+        try:
+            logs_resp = (
+                self.client.table("pipeline_run_logs")
+                .select("job_name, target_date, status, records_processed, error_message")
+                .order("target_date", desc=True)
+                .limit(120)
+                .execute()
+            )
+            for row in logs_resp.data or []:
+                status = (row.get("status") or "").upper()
+                if status in {"WARN", "FAIL", "FAILED", "ERROR"}:
+                    log_alerts.append(row)
+            log_alerts = log_alerts[:20]
+        except Exception as e:
+            print(f"[WARNING] pipeline_run_logs 조회 실패: {e}")
+
+        return {
+            "as_of_kst_date": kst_today.isoformat(),
+            "latest_base_date_by_table": latest_by_table,
+            "lag_days_by_table": lag_days_by_table,
+            "zero_volume_guardrail": zero_volume,
+            "pipeline_alert_logs": log_alerts,
+        }
 
     def fetch_top_volume_stocks(self, limit=10):
         """
