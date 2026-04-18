@@ -55,6 +55,58 @@ def _validate_target_stocks(target_stocks_data: dict) -> bool:
     return any(isinstance(v, list) and len(v) > 0 for v in target_stocks_data.values())
 
 
+def _render_data_guardrails_md(data_guardrails: dict) -> str:
+    """가드레일 요약을 리포트 본문용 마크다운으로 변환."""
+    if not data_guardrails:
+        return "_Guardrail data unavailable._"
+
+    as_of = data_guardrails.get("as_of_kst_datetime", "N/A")
+    lag_map = data_guardrails.get("lag_days_by_table") or {}
+    zero = data_guardrails.get("zero_volume_guardrail") or {}
+    alerts = data_guardrails.get("pipeline_alert_logs") or []
+
+    lag_lines = []
+    for table_name in sorted(lag_map.keys()):
+        lag = lag_map.get(table_name)
+        lag_text = "N/A" if lag is None else str(lag)
+        lag_lines.append(f"- `{table_name}`: lag_days={lag_text}")
+    lag_block = "\n".join(lag_lines) if lag_lines else "- (no lag data)"
+
+    latest_zero = zero.get("latest_zero_volume_pct")
+    prev_zero = zero.get("previous_zero_volume_pct")
+    delta_zero = zero.get("delta_pct")
+    latest_base = zero.get("latest_base_date", "N/A")
+    prev_base = zero.get("previous_base_date", "N/A")
+
+    def _pct_text(v):
+        return "N/A" if v is None else f"{v}%"
+
+    zero_line = (
+        f"- latest={_pct_text(latest_zero)} (base_date={latest_base}), "
+        f"prev={_pct_text(prev_zero)} (base_date={prev_base}), delta={_pct_text(delta_zero)}"
+    )
+
+    if alerts:
+        alert_lines = []
+        for item in alerts[:10]:
+            error_message = item.get("error_message")
+            error_suffix = f" | error={error_message}" if error_message else ""
+            alert_lines.append(
+                f"- `{item.get('target_date')}` | `{item.get('job_name')}` | "
+                f"`{item.get('status')}` | records={item.get('records_processed')}{error_suffix}"
+            )
+        alerts_block = "\n".join(alert_lines)
+    else:
+        alerts_block = "- 최근 3일 WARN/FAIL 없음"
+
+    return (
+        f"**As of (KST)**: {as_of}\n\n"
+        f"### Table Freshness (lag_days)\n{lag_block}\n\n"
+        f"### Zero-Volume Guardrail\n{zero_line}\n\n"
+        f"### Pipeline Alerts (recent 3 days)\n{alerts_block}\n"
+    )
+
+
 def main():
     args = _parse_args()
     report_type = args.report_type
@@ -80,7 +132,10 @@ def main():
     # 3. 데이터 수집 (정해진 순서: 매크로 -> 상위종목 농축 -> 타겟종목)
     logger.info("1. 매크로/시장 폭 데이터 수집 중...")
     macro_market_data = reader.fetch_macro_and_market_data()
-    macro_data = macro_market_data.get("normalized_macro_series")
+    macro_data = (
+        macro_market_data.get("normalized_global_macro_daily")
+        or macro_market_data.get("normalized_macro_series")
+    )
     
     if not macro_data:
         logger.error("매크로 데이터를 수집하지 못했습니다. 시황 분석 품질이 저하될 수 있습니다.")
@@ -102,6 +157,8 @@ def main():
 
     logger.info("4. 뉴스 문서 수집 중...")
     news_text = fetch_news_document()
+    logger.info("5. 데이터 품질 가드레일 점검 중...")
+    data_guardrails = reader.fetch_data_quality_guardrails()
 
     # KST 시간 계산
     kst_tz = datetime.timezone(datetime.timedelta(hours=9))
@@ -122,12 +179,17 @@ def main():
         f"> **Generated at**: {generation_time_str}\n\n"
     )
 
+    # 4-0. Guardrails (LLM 비의존, deterministic)
+    guardrails_md = _render_data_guardrails_md(data_guardrails)
+    report_content += f"## 0. Data Quality Guardrails\n\n{guardrails_md}\n\n---\n\n"
+
     # 4-1. STEP 1: Market Summary
     logger.info(f"STEP 1: Market Summary 생성 중 [{report_type}]...")
     market_summary_md = analyzer.generate_market_summary(
         macro_data=macro_data,
         market_breadth=macro_market_data.get("market_breadth_daily"),
         momentum_data=macro_market_data.get("momentum"),
+        data_guardrails=data_guardrails,
         news_text=news_text,
         generation_time=generation_time_str,
         report_type=report_type,
@@ -152,6 +214,7 @@ def main():
             market_summary=market_summary_md,
             target_stocks_data=target_stocks_data,
             macro_market_data=macro_market_data,
+            data_guardrails=data_guardrails,
             generation_time=generation_time_str,
             report_type=report_type,
         )
