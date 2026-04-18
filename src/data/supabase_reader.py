@@ -129,10 +129,12 @@ class SupabaseReader:
             )
             if resp.data:
                 return resp.data[0]["base_date"]
+            # available_at이 NULL인 레거시 데이터만 존재하는 구간 fallback
+            return self._get_latest_base_date(table_name)
         except Exception:
             # available_at 없는 테이블/권한 이슈는 일반 latest로 fallback
             return self._get_latest_base_date(table_name)
-        return None
+        return self._get_latest_base_date(table_name)
 
     def _fetch_latest_row_by_date(self, table_name: str, base_date: str):
         """지정한 base_date 행을 조회하고 forward fill 후 마지막 레코드를 반환한다."""
@@ -195,6 +197,19 @@ class SupabaseReader:
         """
         try:
             query = (
+                self.client
+                .table("feature_store_daily")
+                .select("base_date, available_at")
+                .eq("feature_name", "volume")
+            )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+
+            resp = query.order("base_date", desc=True).order("available_at", desc=True).limit(1).execute()
+            if resp.data:
+                return resp.data[0]["base_date"]
+            # available_at이 NULL인 historical row만 있는 경우 fallback
+            resp = (
                 self.client
                 .table("feature_store_daily")
                 .select("base_date, available_at")
