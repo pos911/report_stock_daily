@@ -93,6 +93,30 @@ class SupabaseReader:
             print(f"[WARNING] _get_latest_base_date({table_name}) 실패: {e}")
         return None
 
+    def _get_latest_base_date_available(self, table_name: str, as_of_utc_iso: str = None):
+        """
+        available_at 기준으로 사용 가능한 최신 base_date를 조회한다.
+        - 테이블에 available_at이 없으면 일반 최신 base_date로 fallback.
+        """
+        if not as_of_utc_iso:
+            return self._get_latest_base_date(table_name)
+        try:
+            resp = (
+                self.client.table(table_name)
+                .select("base_date, available_at")
+                .lte("available_at", as_of_utc_iso)
+                .order("base_date", desc=True)
+                .order("available_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]["base_date"]
+        except Exception:
+            # available_at 없는 테이블/권한 이슈는 일반 latest로 fallback
+            return self._get_latest_base_date(table_name)
+        return None
+
     def _fetch_latest_row_by_date(self, table_name: str, base_date: str):
         """지정한 base_date 행을 조회하고 forward fill 후 마지막 레코드를 반환한다."""
         if not base_date:
@@ -113,24 +137,63 @@ class SupabaseReader:
             print(f"[WARNING] _fetch_latest_row_by_date({table_name}, {base_date}) 실패: {e}")
             return None
 
-    def get_latest_date(self):
+    def _fetch_macro_series_snapshot(self, base_date: str):
+        """normalized_macro_series를 series_id:value 맵으로 변환한다."""
+        if not base_date:
+            return None
+        try:
+            resp = (
+                self.client.table("normalized_macro_series")
+                .select("series_id, value, base_date, available_at")
+                .eq("base_date", base_date)
+                .execute()
+            )
+            if not resp.data:
+                return None
+            snapshot = {"base_date": base_date}
+            for row in resp.data:
+                series_id = row.get("series_id")
+                if series_id:
+                    snapshot[series_id] = row.get("value")
+            return snapshot
+        except Exception as e:
+            print(f"[WARNING] _fetch_macro_series_snapshot({base_date}) 실패: {e}")
+            return None
+
+    def get_latest_date(self, as_of_utc_iso: str = None):
         """
         feature_store_daily 테이블에서 feature_name='volume' 기준으로
         가장 최신 base_date를 반환. (전체 파이프라인의 기준 날짜 단일 소스)
         """
         try:
-            resp = (
+            query = (
                 self.client
                 .table("feature_store_daily")
-                .select("base_date")
+                .select("base_date, available_at")
                 .eq("feature_name", "volume")
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
             )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+
+            resp = query.order("base_date", desc=True).order("available_at", desc=True).limit(1).execute()
             if resp.data:
                 return resp.data[0]["base_date"]
         except Exception as e:
+            # available_at 컬럼이 없거나 인덱스/권한 이슈 시 fallback
+            try:
+                resp = (
+                    self.client
+                    .table("feature_store_daily")
+                    .select("base_date")
+                    .eq("feature_name", "volume")
+                    .order("base_date", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if resp.data:
+                    return resp.data[0]["base_date"]
+            except Exception:
+                pass
             print(f"[WARNING] get_latest_date 실패: {e}")
         return None
 
@@ -150,8 +213,12 @@ class SupabaseReader:
         """
         results = {}
 
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         # 1. normalized_macro_series
         try:
+            latest_macro_date = self._get_latest_base_date_available("normalized_macro_series", as_of_utc)
+            results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date)
             latest_macro_date = self._get_latest_base_date("normalized_macro_series")
             results["normalized_macro_series"] = self._fetch_latest_row_by_date(
                 "normalized_macro_series",
@@ -163,6 +230,7 @@ class SupabaseReader:
 
         # 1-b. normalized_global_macro_daily (consumer spec 핵심)
         try:
+            latest_global_macro_date = self._get_latest_base_date_available("normalized_global_macro_daily", as_of_utc)
             latest_global_macro_date = self._get_latest_base_date("normalized_global_macro_daily")
             results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
                 "normalized_global_macro_daily",
@@ -174,6 +242,7 @@ class SupabaseReader:
 
         # 2. market_breadth_daily
         try:
+            latest_breadth_date = self._get_latest_base_date_available("market_breadth_daily", as_of_utc)
             latest_breadth_date = self._get_latest_base_date("market_breadth_daily")
             results["market_breadth_daily"] = self._fetch_latest_row_by_date(
                 "market_breadth_daily",
@@ -185,7 +254,7 @@ class SupabaseReader:
 
         # 3. momentum 피처: feature_store_daily에서 symbol='GLOBAL'인 데이터 추출
         try:
-            latest_date = self.get_latest_date()
+            latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
             if latest_date:
                 momentum_resp = (
                     self.client
@@ -216,6 +285,9 @@ class SupabaseReader:
         2) 테이블별 최신일 lag_days
         3) pipeline_run_logs WARN/FAIL 탐지
         """
+        kst_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+        kst_today = kst_now.date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
         kst_today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
         table_names = [
             "normalized_stock_prices_daily",
@@ -230,6 +302,7 @@ class SupabaseReader:
         latest_by_table = {}
         lag_days_by_table = {}
         for table_name in table_names:
+            latest_date = self._get_latest_base_date_available(table_name, as_of_utc)
             latest_date = self._get_latest_base_date(table_name)
             latest_by_table[table_name] = latest_date
             if latest_date:
@@ -324,6 +397,11 @@ class SupabaseReader:
 
         log_alerts = []
         try:
+            recent_from = (kst_today - datetime.timedelta(days=3)).isoformat()
+            logs_resp = (
+                self.client.table("pipeline_run_logs")
+                .select("job_name, target_date, status, records_processed, error_message")
+                .gte("target_date", recent_from)
             logs_resp = (
                 self.client.table("pipeline_run_logs")
                 .select("job_name, target_date, status, records_processed, error_message")
@@ -340,6 +418,7 @@ class SupabaseReader:
             print(f"[WARNING] pipeline_run_logs 조회 실패: {e}")
 
         return {
+            "as_of_kst_datetime": kst_now.isoformat(),
             "as_of_kst_date": kst_today.isoformat(),
             "latest_base_date_by_table": latest_by_table,
             "lag_days_by_table": lag_days_by_table,
@@ -369,7 +448,8 @@ class SupabaseReader:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
         # 2. 기준 날짜
-        latest_date = self.get_latest_date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
         if not latest_date:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
@@ -466,7 +546,8 @@ class SupabaseReader:
 
         name_map = self._fetch_stock_name_map()
         results = {}
-        latest_date = self.get_latest_date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
         if not latest_date:
             return {}
 
