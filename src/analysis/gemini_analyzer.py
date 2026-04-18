@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -11,6 +12,9 @@ load_dotenv()
 
 
 class GeminiAnalyzer:
+    MAX_RETRIES = 4
+    BASE_RETRY_SECONDS = 5
+
     def __init__(self, settings_config_path="config/analyzer_settings.json"):
         """
         Initialize Gemini API and load model settings.
@@ -59,11 +63,31 @@ class GeminiAnalyzer:
 
     def _call_model(self, prompt: str, temperature: float = 0.7) -> str:
         """Shared Gemini API wrapper."""
-        response = self.model.generate_content(
-            contents=[{"role": "user", "parts": [{"text": prompt}]}],
-            generation_config=genai.types.GenerationConfig(temperature=temperature),
-        )
-        return response.text
+        last_error = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = self.model.generate_content(
+                    contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=temperature
+                    ),
+                )
+                return response.text
+            except Exception as exc:
+                last_error = exc
+                error_text = str(exc)
+                is_retryable = "429" in error_text or "ResourceExhausted" in error_text
+                if not is_retryable or attempt == self.MAX_RETRIES:
+                    raise
+
+                sleep_seconds = self.BASE_RETRY_SECONDS * (2 ** (attempt - 1))
+                print(
+                    f"Warning: Gemini call retry {attempt}/{self.MAX_RETRIES} "
+                    f"after {sleep_seconds}s due to: {exc}"
+                )
+                time.sleep(sleep_seconds)
+
+        raise last_error
 
     def generate_market_summary(
         self,
