@@ -174,7 +174,7 @@ def main():
         f"> **Generated at**: {generation_time_str}\n\n"
     )
 
-    logger.info("STEP 1: 시장 요약 생성 중...")
+    logger.info("STEP 1: 시장/뉴스 요약 생성 중...")
     market_summary_md = analyzer.generate_market_summary(
         macro_data=macro_data,
         market_breadth=macro_market_data.get("market_breadth_daily"),
@@ -184,41 +184,25 @@ def main():
         generation_time=generation_time_str,
         report_type=report_type,
     )
-    report_content += f"## 1. 시장 요약\n\n{market_summary_md.strip()}\n\n---\n\n"
-
-    logger.info("STEP 2: 뉴스 요약 생성 중...")
-    news_summary_md = analyzer.generate_news_summary(
-        news_text=news_text,
-        report_type=report_type,
-    )
-    report_content += f"## 2. 뉴스 요약 및 투자 시사점\n\n{news_summary_md.strip()}\n\n---\n\n"
-
-    if top_volume_data:
-        logger.info("STEP 3: 거래대금 상위 종목 분석 중...")
-        top_volume_md = analyzer.generate_top_volume_analysis(
-            top_volume_data=top_volume_data,
-            report_type=report_type,
-        )
-        report_content += f"## 3. 거래대금 상위 종목\n\n{top_volume_md.strip()}\n\n---\n\n"
-    else:
-        logger.warning("거래대금 데이터 부재로 STEP 3을 건너뜁니다.")
+    report_content += f"## 1. 시장 요약 및 뉴스\n\n{market_summary_md.strip()}\n\n---\n\n"
 
     if target_stocks_data:
-        logger.info("STEP 4: 관심 종목 분석 중...")
+        logger.info("STEP 2: 종목 분석 생성 중...")
         stock_analysis_md = analyzer.generate_stock_analysis(
             market_summary=market_summary_md,
+            top_volume_data=top_volume_data or {},
             target_stocks_data=target_stocks_data,
             macro_market_data=macro_market_data,
             data_guardrails=data_guardrails,
             generation_time=generation_time_str,
             report_type=report_type,
         )
-        report_content += f"## 4. 관심 종목 분석\n\n{stock_analysis_md.strip()}\n\n---\n\n"
+        report_content += f"## 2. 거래대금 상위 종목 및 관심 종목 분석\n\n{stock_analysis_md.strip()}\n\n---\n\n"
     else:
-        logger.warning("관심 종목 데이터 부재로 STEP 4를 건너뜁니다.")
+        logger.warning("관심 종목 데이터 부재로 STEP 2를 건너뜁니다.")
 
     guardrails_md = _render_data_guardrails_md(data_guardrails)
-    report_content += f"## 5. 데이터 품질 점검\n\n{guardrails_md}\n"
+    report_content += f"## 3. 데이터 품질 점검\n\n{guardrails_md}\n"
 
     reports_dir = project_root / "reports"
     reports_dir.mkdir(exist_ok=True)

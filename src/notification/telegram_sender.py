@@ -42,9 +42,6 @@ TEXT_REPLACEMENTS = (
     ("🔵", "2) 보수 포인트"),
     ("⚖️", "3) 최종 결론"),
     ("⚖", "3) 최종 결론"),
-    ("긍정적인 포인트:", ""),
-    ("보수적인 포인트:", ""),
-    ("최종 결론:", ""),
     ("Zero volume guardrail", "거래량 0 종목 점검"),
     ("base_date=", "기준일 "),
 )
@@ -119,6 +116,10 @@ class TelegramSender:
             intro_lines.append(f"생성 시각: {generated_at}")
         intro_lines.append(f"섹션 수: {len(sections)}")
         intro = "\n".join(intro_lines).strip()
+        full_message = f"{intro}\n\n{normalized}".strip()
+
+        if len(full_message) <= TELEGRAM_MSG_LIMIT:
+            return [normalized]
 
         if not sections:
             return cls._split_text(intro + "\n\n" + normalized, TELEGRAM_MSG_LIMIT)
@@ -234,6 +235,8 @@ class TelegramSender:
 
             if prev_char == "-" or next_char == "-":
                 return token
+            if prev_char.isalpha() or next_char.isalpha():
+                return token
             if prev_char == "(" and next_char == ")" and re.fullmatch(r"\d{6}", token):
                 return token
 
@@ -295,6 +298,9 @@ class TelegramSender:
         text = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", text)
         text = re.sub(r"\(\s*-\s*(\d[\d,]*)\)", r"(-\1)", text)
         text = re.sub(r"\(\s*(\d[\d,]*)\s*\)", r"(\1)", text)
+        text = re.sub(r"^1\.\s*공격적인 포인트:\s*", "1) 공격적인 포인트: ", text)
+        text = re.sub(r"^2\.\s*최대한 보수적인 포인트:\s*", "2) 최대한 보수적인 포인트: ", text)
+        text = re.sub(r"^3\.\s*최종 결론:\s*", "3) 최종 결론: ", text)
         text = re.sub(r"1\)\s*공격 포인트\s*", "1) 공격 포인트: ", text)
         text = re.sub(r"2\)\s*보수 포인트\s*", "2) 보수 포인트: ", text)
         text = re.sub(r"3\)\s*최종 결론\s*", "3) 최종 결론: ", text)
@@ -319,7 +325,10 @@ class TelegramSender:
                 generated_at = stripped.split("Generated at:", 1)[1].strip()
                 continue
 
-            if re.match(r"^\d+\.\s", stripped):
+            if re.match(
+                r"^\d+\.\s+(?:시장|거래대금|데이터 품질|Top Volume|Market Summary|Stock Analysis)",
+                stripped,
+            ):
                 if current_heading is not None:
                     sections.append((current_heading, "\n".join(current_body).strip()))
                 current_heading = stripped
