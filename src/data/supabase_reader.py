@@ -137,11 +137,20 @@ class SupabaseReader:
             print(f"[WARNING] _fetch_latest_row_by_date({table_name}, {base_date}) 실패: {e}")
             return None
 
+    def _fetch_macro_series_snapshot(self, base_date: str, as_of_utc_iso: str = None):
     def _fetch_macro_series_snapshot(self, base_date: str):
         """normalized_macro_series를 series_id:value 맵으로 변환한다."""
         if not base_date:
             return None
         try:
+            query = (
+                self.client.table("normalized_macro_series")
+                .select("series_id, value, base_date, available_at")
+                .eq("base_date", base_date)
+            )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+            resp = query.execute()
             resp = (
                 self.client.table("normalized_macro_series")
                 .select("series_id, value, base_date, available_at")
@@ -218,6 +227,7 @@ class SupabaseReader:
         # 1. normalized_macro_series
         try:
             latest_macro_date = self._get_latest_base_date_available("normalized_macro_series", as_of_utc)
+            results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date, as_of_utc)
             results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date)
             latest_macro_date = self._get_latest_base_date("normalized_macro_series")
             results["normalized_macro_series"] = self._fetch_latest_row_by_date(
@@ -324,6 +334,21 @@ class SupabaseReader:
             "delta_pct": None,
         }
         try:
+            latest_d = self._get_latest_base_date_available("normalized_stock_prices_daily", as_of_utc)
+            prev_d = None
+            if latest_d:
+                prev_resp = (
+                    self.client.table("normalized_stock_prices_daily")
+                    .select("base_date")
+                    .lt("base_date", latest_d)
+                    .order("base_date", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if prev_resp.data:
+                    prev_d = prev_resp.data[0].get("base_date")
+
+            if latest_d and prev_d:
             date_rows = (
                 self.client.table("normalized_stock_prices_daily")
                 .select("base_date")
