@@ -8,6 +8,60 @@ from src.utils import config
 NEWS_FETCH_TIMEOUT = 30
 NEWS_FETCH_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
+MAX_NEWS_ITEM_CHARS = 240
+
+
+def prepare_news_context(news_text: str) -> str:
+    """
+    Normalize Google Docs news text into a compact, loss-aware list for LLM input.
+    Keeps every distinct paragraph/item, but removes excess whitespace and duplicates.
+    """
+    if not news_text:
+        return ""
+
+    text = news_text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00a0", " ")
+
+    items = []
+    seen = set()
+    current = []
+
+    def flush():
+        if not current:
+            return
+        item = " ".join(current)
+        item = " ".join(item.split())
+        item = item.strip(" -•*|\t")
+        if not item:
+            return
+        normalized_key = item.lower()
+        if normalized_key in seen:
+            return
+        seen.add(normalized_key)
+        if len(item) > MAX_NEWS_ITEM_CHARS:
+            item = item[: MAX_NEWS_ITEM_CHARS - 1].rstrip() + "…"
+        items.append(item)
+
+    for raw_line in text.split("\n"):
+        line = " ".join(raw_line.strip().split())
+        if not line:
+            flush()
+            current = []
+            continue
+
+        if current and not raw_line.startswith((" ", "\t", "-", "•", "*")):
+            flush()
+            current = []
+
+        current.append(line)
+
+    flush()
+
+    if not items:
+        fallback = " ".join(text.split())
+        return fallback[:4000].rstrip() + ("…" if len(fallback) > 4000 else "")
+
+    return "\n".join(f"- {item}" for item in items)
 
 
 def fetch_news_document():

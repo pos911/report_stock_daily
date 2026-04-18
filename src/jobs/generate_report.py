@@ -11,7 +11,7 @@ project_root = current_dir.parent.parent
 sys.path.append(str(project_root))
 
 from src.analysis.gemini_analyzer import GeminiAnalyzer
-from src.data.news_reader import fetch_news_document
+from src.data.news_reader import fetch_news_document, prepare_news_context
 from src.data.supabase_reader import SupabaseReader
 from src.notification.telegram_sender import TelegramSender
 
@@ -266,7 +266,8 @@ def main():
         target_stocks_data = {}
 
     logger.info("4. 뉴스 문서 수집 중...")
-    news_text = fetch_news_document()
+    raw_news_text = fetch_news_document()
+    news_text = prepare_news_context(raw_news_text)
 
     logger.info("5. 데이터 품질 가드레일 점검 중...")
     data_guardrails = reader.fetch_data_quality_guardrails()
@@ -300,16 +301,27 @@ def main():
     stock_analysis_md = ""
     if target_stocks_data:
         logger.info("STEP 2: 종목 분석 생성 중...")
-        stock_analysis_md = analyzer.generate_stock_analysis(
+        top_volume_md = ""
+        if top_volume_data:
+            logger.info("STEP 2-1: 거래대금 상위 종목 요약 생성 중...")
+            top_volume_md = analyzer.generate_top_volume_analysis(
+                top_volume_data=top_volume_data,
+                report_type=report_type,
+            )
+
+        logger.info("STEP 2-2: 관심 종목 배치 분석 생성 중...")
+        stock_analysis_md = analyzer.generate_batched_stock_analysis(
             market_summary=market_summary_md,
-            top_volume_data=top_volume_data or {},
             target_stocks_data=target_stocks_data,
             macro_market_data=macro_market_data,
             data_guardrails=data_guardrails,
             generation_time=generation_time_str,
             report_type=report_type,
         )
-        report_content += f"## 2. 거래대금 상위 종목 및 관심 종목 분석\n\n{stock_analysis_md.strip()}\n\n---\n\n"
+        combined_stock_section = "\n\n".join(
+            part.strip() for part in (top_volume_md, stock_analysis_md) if part and part.strip()
+        )
+        report_content += f"## 2. 거래대금 상위 종목 및 관심 종목 분석\n\n{combined_stock_section.strip()}\n\n---\n\n"
     else:
         logger.warning("관심 종목 데이터 부재로 STEP 2를 건너뜁니다.")
 
