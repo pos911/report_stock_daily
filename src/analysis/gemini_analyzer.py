@@ -65,7 +65,7 @@ class GeminiAnalyzer:
     # Step 1: Market Summary (시간대별 분기)
     # -------------------------------------------------------------------------
 
-    def generate_market_summary(self, macro_data, market_breadth, momentum_data, news_text,
+    def generate_market_summary(self, macro_data, market_breadth, momentum_data, data_guardrails, news_text,
                                 generation_time, report_type: str = "regular"):
         """
         [Step 1] 매크로 시황 분석.
@@ -84,6 +84,9 @@ class GeminiAnalyzer:
 
 [모멘텀 변화율 피처 (feature_store_daily: symbol=GLOBAL)]
 {json.dumps(momentum_data, indent=2, ensure_ascii=False)}
+
+[Data Quality Guardrails]
+{json.dumps(data_guardrails, indent=2, ensure_ascii=False)}
 """
 
         type_instruction = f"""
@@ -130,12 +133,13 @@ class GeminiAnalyzer:
         return self._call_model(prompt, temperature=0.7)
 
     def generate_stock_analysis(self, market_summary, target_stocks_data, macro_market_data, generation_time,
-                                report_type: str = "regular"):
+                                data_guardrails=None, report_type: str = "regular"):
         """
         [Step 3] 타겟 관심 종목 심층 분석.
         'macro_market_data'를 수신하여 매크로/글로벌 시황과 연계 분석함.
         """
         macro_data = macro_market_data.get("normalized_macro_series")
+        global_macro_data = macro_market_data.get("normalized_global_macro_daily")
         momentum_data = macro_market_data.get("momentum")
 
         base_block = f"""
@@ -148,7 +152,9 @@ class GeminiAnalyzer:
 
 [Macro/Global Context Information]
 - Macro Series: {json.dumps(macro_data, indent=1, ensure_ascii=False)}
+- Global Macro Daily: {json.dumps(global_macro_data, indent=1, ensure_ascii=False)}
 - Global Momentum: {json.dumps(momentum_data, indent=1, ensure_ascii=False)}
+- Data Guardrails: {json.dumps(data_guardrails or {}, indent=1, ensure_ascii=False)}
 
 [Target Stocks Data - Supply/Fundamentals/Features]
 {json.dumps(target_stocks_data, indent=2, ensure_ascii=False)}
@@ -165,7 +171,4 @@ class GeminiAnalyzer:
 """
 
         prompt = base_block + intelligent_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
-        return self._call_model(prompt, temperature=0.7)
-
-        prompt = base_block + type_instruction + self._build_silent_skip_rules() + "\n마크다운 형식으로 작성해줘.\n"
         return self._call_model(prompt, temperature=0.7)
