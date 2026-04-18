@@ -229,12 +229,13 @@ class SupabaseReader:
             resp = (
                 self.client
                 .table("feature_store_daily")
-                .select("base_date")
+                .select("base_date, available_at")
                 .eq("feature_name", "volume")
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
             )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+
+            resp = query.order("base_date", desc=True).order("available_at", desc=True).limit(1).execute()
             if resp.data:
                 return resp.data[0]["base_date"]
         except Exception as e:
