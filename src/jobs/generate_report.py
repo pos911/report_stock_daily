@@ -80,7 +80,10 @@ def main():
     # 3. 데이터 수집 (정해진 순서: 매크로 -> 상위종목 농축 -> 타겟종목)
     logger.info("1. 매크로/시장 폭 데이터 수집 중...")
     macro_market_data = reader.fetch_macro_and_market_data()
-    macro_data = macro_market_data.get("normalized_macro_series")
+    macro_data = (
+        macro_market_data.get("normalized_global_macro_daily")
+        or macro_market_data.get("normalized_macro_series")
+    )
     
     if not macro_data:
         logger.error("매크로 데이터를 수집하지 못했습니다. 시황 분석 품질이 저하될 수 있습니다.")
@@ -102,6 +105,8 @@ def main():
 
     logger.info("4. 뉴스 문서 수집 중...")
     news_text = fetch_news_document()
+    logger.info("5. 데이터 품질 가드레일 점검 중...")
+    data_guardrails = reader.fetch_data_quality_guardrails()
 
     # KST 시간 계산
     kst_tz = datetime.timezone(datetime.timedelta(hours=9))
@@ -128,6 +133,7 @@ def main():
         macro_data=macro_data,
         market_breadth=macro_market_data.get("market_breadth_daily"),
         momentum_data=macro_market_data.get("momentum"),
+        data_guardrails=data_guardrails,
         news_text=news_text,
         generation_time=generation_time_str,
         report_type=report_type,
@@ -152,6 +158,7 @@ def main():
             market_summary=market_summary_md,
             target_stocks_data=target_stocks_data,
             macro_market_data=macro_market_data,
+            data_guardrails=data_guardrails,
             generation_time=generation_time_str,
             report_type=report_type,
         )
