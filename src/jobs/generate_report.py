@@ -106,6 +106,117 @@ def _render_data_guardrails_md(data_guardrails: dict) -> str:
     )
 
 
+def _extract_md_section(text: str, heading: str) -> str:
+    """Extract body for a markdown heading like '### 뉴스 요약'."""
+    if not text:
+        return ""
+
+    lines = text.splitlines()
+    target = f"### {heading}"
+    collecting = False
+    collected = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == target:
+            collecting = True
+            continue
+        if collecting and stripped.startswith("### "):
+            break
+        if collecting:
+            collected.append(line.rstrip())
+
+    return "\n".join(collected).strip()
+
+
+def _build_telegram_warning(data_guardrails: dict) -> str:
+    """Return a short one-line warning only when guardrails look abnormal."""
+    if not data_guardrails:
+        return "데이터 점검 필요: 데이터 품질 정보를 불러오지 못했습니다."
+
+    issues = []
+    lag_map = data_guardrails.get("lag_days_by_table") or {}
+    alerts = data_guardrails.get("pipeline_alert_logs") or []
+    zero = data_guardrails.get("zero_volume_guardrail") or {}
+
+    critical_tables = (
+        "normalized_stock_prices_daily",
+        "normalized_stock_supply_daily",
+        "normalized_global_macro_daily",
+        "feature_store_daily",
+    )
+    stale_tables = [
+        table_name
+        for table_name in critical_tables
+        if isinstance(lag_map.get(table_name), int) and lag_map.get(table_name, 0) > 1
+    ]
+    if stale_tables:
+        issues.append(f"지연 테이블 {', '.join(stale_tables[:3])}")
+
+    if alerts:
+        issues.append(f"파이프라인 경고 {len(alerts)}건")
+
+    latest_zero = zero.get("latest_zero_volume_pct")
+    delta_zero = zero.get("delta_pct")
+    if isinstance(latest_zero, (int, float)) and latest_zero >= 10:
+        issues.append(f"거래량 0 종목 비율 {latest_zero:.1f}%")
+    if isinstance(delta_zero, (int, float)) and abs(delta_zero) >= 20:
+        issues.append(f"거래량 0 종목 비율 급변 {delta_zero:+.1f}%p")
+
+    if not issues:
+        return ""
+
+    return "데이터 점검 필요: " + ", ".join(issues[:3])
+
+
+def _build_telegram_report(
+    report_label: str,
+    generation_time_str: str,
+    market_summary_md: str,
+    stock_analysis_md: str,
+    data_guardrails: dict,
+) -> str:
+    """Create a Telegram-first message focused on financial analysis."""
+    market_one_liner = _extract_md_section(market_summary_md, "시장 한줄 요약")
+    market_points = _extract_md_section(market_summary_md, "핵심 포인트")
+    news_summary = _extract_md_section(market_summary_md, "뉴스 요약")
+    investment_implications = _extract_md_section(market_summary_md, "투자 시사점")
+    market_view = _extract_md_section(market_summary_md, "오늘의 시장 판단")
+    target_stock_analysis = _extract_md_section(stock_analysis_md, "관심 종목 분석")
+    warning_line = _build_telegram_warning(data_guardrails)
+
+    blocks = [
+        f"# 데일리 퀀트 리포트 - {report_label}",
+        f"> **Generated at**: {generation_time_str}",
+        "",
+        "## 1. 시장 분석",
+    ]
+
+    if market_view:
+        blocks.extend(["", f"### 오늘의 시장 판단\n{market_view}"])
+    if market_one_liner:
+        blocks.extend(["", f"### 시장 한줄 요약\n{market_one_liner}"])
+
+    blocks.extend(["", "## 2. 주요 시황 및 뉴스"])
+    if market_points:
+        blocks.extend(["", f"### 핵심 포인트\n{market_points}"])
+    if news_summary:
+        blocks.extend(["", f"### 주요 뉴스\n{news_summary}"])
+    if investment_implications:
+        blocks.extend(["", f"### 투자 시사점\n{investment_implications}"])
+
+    blocks.extend(["", "## 3. 지정 종목 투자 분석"])
+    if target_stock_analysis:
+        blocks.extend(["", target_stock_analysis])
+    else:
+        blocks.extend(["", "_지정 종목 분석 데이터가 없어 이번 메시지에서는 제외했습니다._"])
+
+    if warning_line:
+        blocks.extend(["", "---", "", f"주의: {warning_line}"])
+
+    return "\n".join(blocks).strip() + "\n"
+
+
 def main():
     args = _parse_args()
     report_type = args.report_type
@@ -186,6 +297,7 @@ def main():
     )
     report_content += f"## 1. 시장 요약 및 뉴스\n\n{market_summary_md.strip()}\n\n---\n\n"
 
+    stock_analysis_md = ""
     if target_stocks_data:
         logger.info("STEP 2: 종목 분석 생성 중...")
         stock_analysis_md = analyzer.generate_stock_analysis(
@@ -216,8 +328,15 @@ def main():
     logger.info(f"리포트 저장 완료: {file_path}")
 
     try:
+        telegram_report = _build_telegram_report(
+            report_label=report_label,
+            generation_time_str=generation_time_str,
+            market_summary_md=market_summary_md,
+            stock_analysis_md=stock_analysis_md,
+            data_guardrails=data_guardrails,
+        )
         sender = TelegramSender()
-        sent = sender.send_report(report_content)
+        sent = sender.send_report(telegram_report)
         if sent:
             logger.info("텔레그램 발송 성공.")
         else:

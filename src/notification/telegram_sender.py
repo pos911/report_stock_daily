@@ -326,7 +326,7 @@ class TelegramSender:
                 continue
 
             if re.match(
-                r"^\d+\.\s+(?:시장|거래대금|데이터 품질|Top Volume|Market Summary|Stock Analysis)",
+                r"^\d+\.\s+(?:시장|주요 시황|거래대금|지정 종목|데이터 품질|Top Volume|Market Summary|Stock Analysis)",
                 stripped,
             ):
                 if current_heading is not None:
