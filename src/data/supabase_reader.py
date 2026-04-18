@@ -58,7 +58,16 @@ class SupabaseReader:
                 query = query.lte("available_at", as_of_utc_iso)
             response = query.execute()
             if not response.data:
-                return None
+                # available_at 필터 결과가 비었어도 legacy 데이터가 있을 수 있어 fallback 조회
+                response = (
+                    self.client.table(table_name)
+                    .select("*")
+                    .order("base_date", desc=True)
+                    .limit(lookback_days)
+                    .execute()
+                )
+                if not response.data:
+                    return None
 
             df = pd.DataFrame(response.data).sort_values("base_date")
             df = df.ffill()
@@ -179,7 +188,15 @@ class SupabaseReader:
                     .execute()
                 )
             if not resp.data:
-                return None
+                # available_at 필터 결과가 빈 경우에도 비필터 쿼리로 한 번 더 fallback
+                resp = (
+                    self.client.table("normalized_macro_series")
+                    .select("series_id, value, base_date")
+                    .eq("base_date", base_date)
+                    .execute()
+                )
+                if not resp.data:
+                    return None
             snapshot = {"base_date": base_date}
             for row in resp.data:
                 series_id = row.get("series_id")
