@@ -4,15 +4,15 @@ on:
   schedule:
     # ── KST → UTC 변환 (KST = UTC+9) ──────────────────────────────────────
     # 07:00 KST = 22:00 UTC (전일)  → Morning Report
-    - cron: '0 22 * * *'
+    - cron: '0 22 * * 1-5'
     # 11:00 KST = 02:00 UTC         → Regular Report
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * 1-5'
     # 13:30 KST = 04:30 UTC         → Regular Report
-    - cron: '30 4 * * *'
+    - cron: '30 4 * * 1-5'
     # 14:30 KST = 05:30 UTC         → Regular Report
-    - cron: '30 5 * * *'
+    - cron: '30 5 * * 1-5'
     # 15:30 KST = 06:30 UTC         → Closing Report
-    - cron: '30 6 * * *'
+    - cron: '30 6 * * 1-5'
   workflow_dispatch:
     inputs:
       report_type:
@@ -30,7 +30,7 @@ jobs:
   morning-report:
     name: Morning Report (07:00 KST)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 22 * * *'
+    if: github.event_name == 'schedule' && github.event.schedule == '0 22 * * 1-5'
 
     steps:
       - uses: actions/checkout@v3
@@ -97,7 +97,7 @@ jobs:
   closing-report:
     name: Closing Report (15:30 KST)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 6 * * *'
+    if: github.event_name == 'schedule' && github.event.schedule == '30 6 * * 1-5'
 
     steps:
       - uses: actions/checkout@v3
@@ -166,9 +166,9 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       (github.event_name == 'schedule' && (
-        github.event.schedule == '0 2 * * *' ||
-        github.event.schedule == '30 4 * * *' ||
-        github.event.schedule == '30 5 * * *'
+        github.event.schedule == '0 2 * * 1-5' ||
+        github.event.schedule == '30 4 * * 1-5' ||
+        github.event.schedule == '30 5 * * 1-5'
       )) ||
       github.event_name == 'workflow_dispatch'
 

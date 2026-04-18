@@ -106,25 +106,13 @@ def _render_data_guardrails_md(data_guardrails: dict) -> str:
     )
 
 
-def _is_weekend_kst(now_kst: datetime.datetime) -> bool:
-    """Return True for Saturday(5) or Sunday(6) in KST."""
-    return now_kst.weekday() >= 5
-
-
 def main():
     args = _parse_args()
     report_type = args.report_type
     kst_tz = datetime.timezone(datetime.timedelta(hours=9))
     now_kst = datetime.datetime.now(kst_tz)
-    is_weekend = _is_weekend_kst(now_kst)
 
     logger.info(f"=== Daily Report Pipeline 시작 [type={report_type}] ===")
-
-    if is_weekend:
-        logger.info(
-            f"주말(KST 기준 {now_kst.strftime('%Y-%m-%d')})에는 리포트 생성 및 텔레그램 발송을 건너뜁니다."
-        )
-        return
 
     target_stocks_path = project_root / "config" / "target_stocks.json"
     target_symbols = []
