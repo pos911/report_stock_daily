@@ -1,9 +1,14 @@
-import os
-import json
+import time
+
 import requests
 
-
 from src.utils import config
+
+
+NEWS_FETCH_TIMEOUT = 30
+NEWS_FETCH_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
+
 
 def fetch_news_document():
     """
@@ -16,10 +21,17 @@ def fetch_news_document():
         print("Warning: Google Docs news URL not found in api_keys.json or env var. Skipping news.")
         return ""
 
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return response.text
-    except Exception as e:
-        print(f"Error fetching news document: {e}")
-        return ""
+    last_error = None
+    for attempt in range(1, NEWS_FETCH_RETRIES + 1):
+        try:
+            response = requests.get(url, timeout=NEWS_FETCH_TIMEOUT)
+            response.raise_for_status()
+            return response.text
+        except Exception as exc:
+            last_error = exc
+            print(f"Warning: news fetch attempt {attempt}/{NEWS_FETCH_RETRIES} failed: {exc}")
+            if attempt < NEWS_FETCH_RETRIES:
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+    print(f"Error fetching news document after retries: {last_error}")
+    return ""
