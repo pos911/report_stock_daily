@@ -42,19 +42,21 @@ class SupabaseReader:
             print(f"[WARNING] _fetch_stock_name_map 실패: {e}")
         return {}
 
-    def _fetch_and_ffill_timeseries(self, table_name, lookback_days=5):
+    def _fetch_and_ffill_timeseries(self, table_name, lookback_days=5, as_of_utc_iso: str = None):
         """
         Fetches the last N days of data from a table, applies forward fill,
         and returns the most recent record as a dictionary.
         """
         try:
-            response = (
+            query = (
                 self.client.table(table_name)
                 .select("*")
                 .order("base_date", desc=True)
                 .limit(lookback_days)
-                .execute()
             )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+            response = query.execute()
             if not response.data:
                 return None
 
@@ -62,6 +64,21 @@ class SupabaseReader:
             df = df.ffill()
             return df.iloc[-1].to_dict()
         except Exception as e:
+            # available_at 컬럼/권한 미지원 시 과거 방식으로 fallback
+            try:
+                response = (
+                    self.client.table(table_name)
+                    .select("*")
+                    .order("base_date", desc=True)
+                    .limit(lookback_days)
+                    .execute()
+                )
+                if response.data:
+                    df = pd.DataFrame(response.data).sort_values("base_date")
+                    df = df.ffill()
+                    return df.iloc[-1].to_dict()
+            except Exception:
+                pass
             print(f"[WARNING] _fetch_and_ffill_timeseries({table_name}) 실패: {e}")
             return None
 
@@ -138,7 +155,6 @@ class SupabaseReader:
             return None
 
     def _fetch_macro_series_snapshot(self, base_date: str, as_of_utc_iso: str = None):
-    def _fetch_macro_series_snapshot(self, base_date: str):
         """normalized_macro_series를 series_id:value 맵으로 변환한다."""
         if not base_date:
             return None
@@ -148,15 +164,18 @@ class SupabaseReader:
                 .select("series_id, value, base_date, available_at")
                 .eq("base_date", base_date)
             )
-            if as_of_utc_iso:
-                query = query.lte("available_at", as_of_utc_iso)
-            resp = query.execute()
-            resp = (
-                self.client.table("normalized_macro_series")
-                .select("series_id, value, base_date, available_at")
-                .eq("base_date", base_date)
-                .execute()
-            )
+            try:
+                if as_of_utc_iso:
+                    query = query.lte("available_at", as_of_utc_iso)
+                resp = query.execute()
+            except Exception:
+                # available_at 컬럼 미존재/권한 이슈 시 fallback
+                resp = (
+                    self.client.table("normalized_macro_series")
+                    .select("series_id, value, base_date")
+                    .eq("base_date", base_date)
+                    .execute()
+                )
             if not resp.data:
                 return None
             snapshot = {"base_date": base_date}
@@ -228,12 +247,6 @@ class SupabaseReader:
         try:
             latest_macro_date = self._get_latest_base_date_available("normalized_macro_series", as_of_utc)
             results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date, as_of_utc)
-            results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date)
-            latest_macro_date = self._get_latest_base_date("normalized_macro_series")
-            results["normalized_macro_series"] = self._fetch_latest_row_by_date(
-                "normalized_macro_series",
-                latest_macro_date,
-            )
         except Exception as e:
             print(f"[WARNING] normalized_macro_series 조회 실패: {e}")
             results["normalized_macro_series"] = None
@@ -241,7 +254,6 @@ class SupabaseReader:
         # 1-b. normalized_global_macro_daily (consumer spec 핵심)
         try:
             latest_global_macro_date = self._get_latest_base_date_available("normalized_global_macro_daily", as_of_utc)
-            latest_global_macro_date = self._get_latest_base_date("normalized_global_macro_daily")
             results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
                 "normalized_global_macro_daily",
                 latest_global_macro_date,
@@ -252,11 +264,10 @@ class SupabaseReader:
 
         # 2. market_breadth_daily
         try:
-            latest_breadth_date = self._get_latest_base_date_available("market_breadth_daily", as_of_utc)
-            latest_breadth_date = self._get_latest_base_date("market_breadth_daily")
-            results["market_breadth_daily"] = self._fetch_latest_row_by_date(
+            results["market_breadth_daily"] = self._fetch_and_ffill_timeseries(
                 "market_breadth_daily",
-                latest_breadth_date,
+                lookback_days=5,
+                as_of_utc_iso=as_of_utc,
             )
         except Exception as e:
             print(f"[WARNING] market_breadth_daily 조회 실패: {e}")
@@ -298,7 +309,6 @@ class SupabaseReader:
         kst_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
         kst_today = kst_now.date()
         as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        kst_today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
         table_names = [
             "normalized_stock_prices_daily",
             "normalized_stock_supply_daily",
@@ -313,7 +323,6 @@ class SupabaseReader:
         lag_days_by_table = {}
         for table_name in table_names:
             latest_date = self._get_latest_base_date_available(table_name, as_of_utc)
-            latest_date = self._get_latest_base_date(table_name)
             latest_by_table[table_name] = latest_date
             if latest_date:
                 try:
@@ -349,23 +358,6 @@ class SupabaseReader:
                     prev_d = prev_resp.data[0].get("base_date")
 
             if latest_d and prev_d:
-            date_rows = (
-                self.client.table("normalized_stock_prices_daily")
-                .select("base_date")
-                .order("base_date", desc=True)
-                .limit(12)
-                .execute()
-            )
-            distinct_dates = []
-            for row in date_rows.data or []:
-                d = row.get("base_date")
-                if d and d not in distinct_dates:
-                    distinct_dates.append(d)
-                if len(distinct_dates) >= 2:
-                    break
-
-            if len(distinct_dates) >= 2:
-                latest_d, prev_d = distinct_dates[0], distinct_dates[1]
                 universe_resp = self.client.table("stocks_master").select("symbol, is_active").execute()
                 active_symbols = {
                     item["symbol"]
@@ -427,9 +419,6 @@ class SupabaseReader:
                 self.client.table("pipeline_run_logs")
                 .select("job_name, target_date, status, records_processed, error_message")
                 .gte("target_date", recent_from)
-            logs_resp = (
-                self.client.table("pipeline_run_logs")
-                .select("job_name, target_date, status, records_processed, error_message")
                 .order("target_date", desc=True)
                 .limit(120)
                 .execute()
@@ -444,7 +433,6 @@ class SupabaseReader:
 
         return {
             "as_of_kst_datetime": kst_now.isoformat(),
-            "as_of_kst_date": kst_today.isoformat(),
             "latest_base_date_by_table": latest_by_table,
             "lag_days_by_table": lag_days_by_table,
             "zero_volume_guardrail": zero_volume,
