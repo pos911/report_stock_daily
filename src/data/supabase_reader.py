@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -41,19 +42,21 @@ class SupabaseReader:
             print(f"[WARNING] _fetch_stock_name_map 실패: {e}")
         return {}
 
-    def _fetch_and_ffill_timeseries(self, table_name, lookback_days=5):
+    def _fetch_and_ffill_timeseries(self, table_name, lookback_days=5, as_of_utc_iso: str = None):
         """
         Fetches the last N days of data from a table, applies forward fill,
         and returns the most recent record as a dictionary.
         """
         try:
-            response = (
+            query = (
                 self.client.table(table_name)
                 .select("*")
                 .order("base_date", desc=True)
                 .limit(lookback_days)
-                .execute()
             )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+            response = query.execute()
             if not response.data:
                 return None
 
@@ -61,6 +64,21 @@ class SupabaseReader:
             df = df.ffill()
             return df.iloc[-1].to_dict()
         except Exception as e:
+            # available_at 컬럼/권한 미지원 시 과거 방식으로 fallback
+            try:
+                response = (
+                    self.client.table(table_name)
+                    .select("*")
+                    .order("base_date", desc=True)
+                    .limit(lookback_days)
+                    .execute()
+                )
+                if response.data:
+                    df = pd.DataFrame(response.data).sort_values("base_date")
+                    df = df.ffill()
+                    return df.iloc[-1].to_dict()
+            except Exception:
+                pass
             print(f"[WARNING] _fetch_and_ffill_timeseries({table_name}) 실패: {e}")
             return None
 
@@ -76,12 +94,121 @@ class SupabaseReader:
                 item["stock_name"] = name_map[symbol]
         return data
 
-    def get_latest_date(self):
+    def _get_latest_base_date(self, table_name: str):
+        """테이블별 최신 base_date를 조회한다."""
+        try:
+            resp = (
+                self.client.table(table_name)
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]["base_date"]
+        except Exception as e:
+            print(f"[WARNING] _get_latest_base_date({table_name}) 실패: {e}")
+        return None
+
+    def _get_latest_base_date_available(self, table_name: str, as_of_utc_iso: str = None):
+        """
+        available_at 기준으로 사용 가능한 최신 base_date를 조회한다.
+        - 테이블에 available_at이 없으면 일반 최신 base_date로 fallback.
+        """
+        if not as_of_utc_iso:
+            return self._get_latest_base_date(table_name)
+        try:
+            resp = (
+                self.client.table(table_name)
+                .select("base_date, available_at")
+                .lte("available_at", as_of_utc_iso)
+                .order("base_date", desc=True)
+                .order("available_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if resp.data:
+                return resp.data[0]["base_date"]
+            # available_at이 NULL인 레거시 데이터만 존재하는 구간 fallback
+            return self._get_latest_base_date(table_name)
+        except Exception:
+            # available_at 없는 테이블/권한 이슈는 일반 latest로 fallback
+            return self._get_latest_base_date(table_name)
+        return self._get_latest_base_date(table_name)
+
+    def _fetch_latest_row_by_date(self, table_name: str, base_date: str):
+        """지정한 base_date 행을 조회하고 forward fill 후 마지막 레코드를 반환한다."""
+        if not base_date:
+            return None
+        try:
+            resp = (
+                self.client.table(table_name)
+                .select("*")
+                .eq("base_date", base_date)
+                .execute()
+            )
+            if not resp.data:
+                return None
+            df = pd.DataFrame(resp.data).sort_values("base_date")
+            df = df.ffill()
+            return df.iloc[-1].to_dict()
+        except Exception as e:
+            print(f"[WARNING] _fetch_latest_row_by_date({table_name}, {base_date}) 실패: {e}")
+            return None
+
+    def _fetch_macro_series_snapshot(self, base_date: str, as_of_utc_iso: str = None):
+        """normalized_macro_series를 series_id:value 맵으로 변환한다."""
+        if not base_date:
+            return None
+        try:
+            query = (
+                self.client.table("normalized_macro_series")
+                .select("series_id, value, base_date, available_at")
+                .eq("base_date", base_date)
+            )
+            try:
+                if as_of_utc_iso:
+                    query = query.lte("available_at", as_of_utc_iso)
+                resp = query.execute()
+            except Exception:
+                # available_at 컬럼 미존재/권한 이슈 시 fallback
+                resp = (
+                    self.client.table("normalized_macro_series")
+                    .select("series_id, value, base_date")
+                    .eq("base_date", base_date)
+                    .execute()
+                )
+            if not resp.data:
+                return None
+            snapshot = {"base_date": base_date}
+            for row in resp.data:
+                series_id = row.get("series_id")
+                if series_id:
+                    snapshot[series_id] = row.get("value")
+            return snapshot
+        except Exception as e:
+            print(f"[WARNING] _fetch_macro_series_snapshot({base_date}) 실패: {e}")
+            return None
+
+    def get_latest_date(self, as_of_utc_iso: str = None):
         """
         feature_store_daily 테이블에서 feature_name='volume' 기준으로
         가장 최신 base_date를 반환. (전체 파이프라인의 기준 날짜 단일 소스)
         """
         try:
+            query = (
+                self.client
+                .table("feature_store_daily")
+                .select("base_date, available_at")
+                .eq("feature_name", "volume")
+            )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+
+            resp = query.order("base_date", desc=True).order("available_at", desc=True).limit(1).execute()
+            if resp.data:
+                return resp.data[0]["base_date"]
+            # available_at이 NULL인 historical row만 있는 경우 fallback
             resp = (
                 self.client
                 .table("feature_store_daily")
@@ -94,6 +221,21 @@ class SupabaseReader:
             if resp.data:
                 return resp.data[0]["base_date"]
         except Exception as e:
+            # available_at 컬럼이 없거나 인덱스/권한 이슈 시 fallback
+            try:
+                resp = (
+                    self.client
+                    .table("feature_store_daily")
+                    .select("base_date")
+                    .eq("feature_name", "volume")
+                    .order("base_date", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if resp.data:
+                    return resp.data[0]["base_date"]
+            except Exception:
+                pass
             print(f"[WARNING] get_latest_date 실패: {e}")
         return None
 
@@ -113,32 +255,41 @@ class SupabaseReader:
         """
         results = {}
 
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         # 1. normalized_macro_series
         try:
-            macro_resp = (
-                self.client
-                .table("normalized_macro_series")
-                .select("*")
-                .order("base_date", desc=True)
-                .limit(10)
-                .execute()
-            )
-            if macro_resp.data:
-                df = pd.DataFrame(macro_resp.data).sort_values("base_date")
-                df = df.ffill()
-                results["normalized_macro_series"] = df.iloc[-1].to_dict()
-            else:
-                results["normalized_macro_series"] = None
+            latest_macro_date = self._get_latest_base_date_available("normalized_macro_series", as_of_utc)
+            results["normalized_macro_series"] = self._fetch_macro_series_snapshot(latest_macro_date, as_of_utc)
         except Exception as e:
             print(f"[WARNING] normalized_macro_series 조회 실패: {e}")
             results["normalized_macro_series"] = None
 
+        # 1-b. normalized_global_macro_daily (consumer spec 핵심)
+        try:
+            latest_global_macro_date = self._get_latest_base_date_available("normalized_global_macro_daily", as_of_utc)
+            results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
+                "normalized_global_macro_daily",
+                latest_global_macro_date,
+            )
+        except Exception as e:
+            print(f"[WARNING] normalized_global_macro_daily 조회 실패: {e}")
+            results["normalized_global_macro_daily"] = None
+
         # 2. market_breadth_daily
-        results["market_breadth_daily"] = self._fetch_and_ffill_timeseries("market_breadth_daily")
+        try:
+            results["market_breadth_daily"] = self._fetch_and_ffill_timeseries(
+                "market_breadth_daily",
+                lookback_days=5,
+                as_of_utc_iso=as_of_utc,
+            )
+        except Exception as e:
+            print(f"[WARNING] market_breadth_daily 조회 실패: {e}")
+            results["market_breadth_daily"] = None
 
         # 3. momentum 피처: feature_store_daily에서 symbol='GLOBAL'인 데이터 추출
         try:
-            latest_date = self.get_latest_date()
+            latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
             if latest_date:
                 momentum_resp = (
                     self.client
@@ -162,6 +313,146 @@ class SupabaseReader:
 
         return results
 
+    def fetch_data_quality_guardrails(self):
+        """
+        소비자 규격 기반 데이터 품질 가드레일 요약:
+        1) zero_volume_pct 급증 추적
+        2) 테이블별 최신일 lag_days
+        3) pipeline_run_logs WARN/FAIL 탐지
+        """
+        kst_now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+        kst_today = kst_now.date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        table_names = [
+            "normalized_stock_prices_daily",
+            "normalized_stock_supply_daily",
+            "normalized_stock_fundamentals_ratios",
+            "normalized_global_macro_daily",
+            "market_breadth_daily",
+            "normalized_derivatives_daily",
+            "feature_store_daily",
+        ]
+
+        latest_by_table = {}
+        lag_days_by_table = {}
+        for table_name in table_names:
+            latest_date = self._get_latest_base_date_available(table_name, as_of_utc)
+            latest_by_table[table_name] = latest_date
+            if latest_date:
+                try:
+                    lag_days_by_table[table_name] = max(
+                        0,
+                        (kst_today - datetime.date.fromisoformat(str(latest_date))).days,
+                    )
+                except Exception:
+                    lag_days_by_table[table_name] = None
+            else:
+                lag_days_by_table[table_name] = None
+
+        zero_volume = {
+            "latest_base_date": None,
+            "previous_base_date": None,
+            "latest_zero_volume_pct": None,
+            "previous_zero_volume_pct": None,
+            "delta_pct": None,
+        }
+        try:
+            latest_d = self._get_latest_base_date_available("normalized_stock_prices_daily", as_of_utc)
+            prev_d = None
+            if latest_d:
+                prev_resp = (
+                    self.client.table("normalized_stock_prices_daily")
+                    .select("base_date")
+                    .lt("base_date", latest_d)
+                    .order("base_date", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if prev_resp.data:
+                    prev_d = prev_resp.data[0].get("base_date")
+
+            if latest_d and prev_d:
+                universe_resp = self.client.table("stocks_master").select("symbol, is_active").execute()
+                active_symbols = {
+                    item["symbol"]
+                    for item in (universe_resp.data or [])
+                    if item.get("is_active") is True
+                }
+
+                price_resp = (
+                    self.client.table("normalized_stock_prices_daily")
+                    .select("symbol, base_date, volume")
+                    .in_("base_date", [latest_d, prev_d])
+                    .execute()
+                )
+                latest_rows = []
+                prev_rows = []
+                for row in price_resp.data or []:
+                    symbol = row.get("symbol")
+                    if active_symbols and symbol not in active_symbols:
+                        continue
+                    if row.get("base_date") == latest_d:
+                        latest_rows.append(row)
+                    elif row.get("base_date") == prev_d:
+                        prev_rows.append(row)
+
+                def calc_zero_pct(rows):
+                    if not rows:
+                        return None
+                    zero_count = 0
+                    total_count = 0
+                    for r in rows:
+                        vol = r.get("volume")
+                        try:
+                            v = float(vol) if vol is not None else 0.0
+                        except Exception:
+                            v = 0.0
+                        if v <= 0:
+                            zero_count += 1
+                        total_count += 1
+                    return round((zero_count / total_count) * 100, 2) if total_count else None
+
+                latest_pct = calc_zero_pct(latest_rows)
+                prev_pct = calc_zero_pct(prev_rows)
+                delta = round(latest_pct - prev_pct, 2) if latest_pct is not None and prev_pct is not None else None
+
+                zero_volume = {
+                    "latest_base_date": latest_d,
+                    "previous_base_date": prev_d,
+                    "latest_zero_volume_pct": latest_pct,
+                    "previous_zero_volume_pct": prev_pct,
+                    "delta_pct": delta,
+                }
+        except Exception as e:
+            print(f"[WARNING] zero_volume_pct 계산 실패: {e}")
+
+        log_alerts = []
+        try:
+            recent_from = (kst_today - datetime.timedelta(days=3)).isoformat()
+            logs_resp = (
+                self.client.table("pipeline_run_logs")
+                .select("job_name, target_date, status, records_processed, error_message")
+                .gte("target_date", recent_from)
+                .order("target_date", desc=True)
+                .limit(120)
+                .execute()
+            )
+            for row in logs_resp.data or []:
+                status = (row.get("status") or "").upper()
+                if status in {"WARN", "FAIL", "FAILED", "ERROR"}:
+                    log_alerts.append(row)
+            log_alerts = log_alerts[:20]
+        except Exception as e:
+            print(f"[WARNING] pipeline_run_logs 조회 실패: {e}")
+
+        return {
+            "as_of_kst_datetime": kst_now.isoformat(),
+            "latest_base_date_by_table": latest_by_table,
+            "lag_days_by_table": lag_days_by_table,
+            "zero_volume_guardrail": zero_volume,
+            "pipeline_alert_logs": log_alerts,
+        }
+
     def fetch_top_volume_stocks(self, limit=10):
         """
         feature_store_daily 기준 최신 날짜의 거래량 상위 종목 조회 및 데이터 농축.
@@ -184,7 +475,8 @@ class SupabaseReader:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
         # 2. 기준 날짜
-        latest_date = self.get_latest_date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
         if not latest_date:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
@@ -281,7 +573,8 @@ class SupabaseReader:
 
         name_map = self._fetch_stock_name_map()
         results = {}
-        latest_date = self.get_latest_date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
         if not latest_date:
             return {}
 
