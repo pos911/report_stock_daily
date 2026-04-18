@@ -160,24 +160,40 @@ class SupabaseReader:
             print(f"[WARNING] _fetch_macro_series_snapshot({base_date}) 실패: {e}")
             return None
 
-    def get_latest_date(self):
+    def get_latest_date(self, as_of_utc_iso: str = None):
         """
         feature_store_daily 테이블에서 feature_name='volume' 기준으로
         가장 최신 base_date를 반환. (전체 파이프라인의 기준 날짜 단일 소스)
         """
         try:
-            resp = (
+            query = (
                 self.client
                 .table("feature_store_daily")
-                .select("base_date")
+                .select("base_date, available_at")
                 .eq("feature_name", "volume")
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
             )
+            if as_of_utc_iso:
+                query = query.lte("available_at", as_of_utc_iso)
+
+            resp = query.order("base_date", desc=True).order("available_at", desc=True).limit(1).execute()
             if resp.data:
                 return resp.data[0]["base_date"]
         except Exception as e:
+            # available_at 컬럼이 없거나 인덱스/권한 이슈 시 fallback
+            try:
+                resp = (
+                    self.client
+                    .table("feature_store_daily")
+                    .select("base_date")
+                    .eq("feature_name", "volume")
+                    .order("base_date", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if resp.data:
+                    return resp.data[0]["base_date"]
+            except Exception:
+                pass
             print(f"[WARNING] get_latest_date 실패: {e}")
         return None
 
@@ -231,7 +247,7 @@ class SupabaseReader:
 
         # 3. momentum 피처: feature_store_daily에서 symbol='GLOBAL'인 데이터 추출
         try:
-            latest_date = self.get_latest_date()
+            latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
             if latest_date:
                 momentum_resp = (
                     self.client
@@ -419,7 +435,8 @@ class SupabaseReader:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
         # 2. 기준 날짜
-        latest_date = self.get_latest_date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
         if not latest_date:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
@@ -516,7 +533,8 @@ class SupabaseReader:
 
         name_map = self._fetch_stock_name_map()
         results = {}
-        latest_date = self.get_latest_date()
+        as_of_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        latest_date = self.get_latest_date(as_of_utc_iso=as_of_utc)
         if not latest_date:
             return {}
 
