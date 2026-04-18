@@ -9,6 +9,45 @@ from src.utils import config
 TELEGRAM_MSG_LIMIT = 4096
 TELEGRAM_SEND_TIMEOUT = 30
 CHUNK_OVERHEAD = 128
+SECTION_TITLE_MAP = {
+    "0. Data Quality Guardrails": "0. 데이터 품질 점검",
+    "1. Market Summary": "1. 시장 요약",
+    "2. Top Volume & Smart Money": "2. 거래대금 상위/수급 포착",
+    "3. Stock Analysis & Strategy": "3. 종목 분석 및 전략",
+}
+TEXT_REPLACEMENTS = (
+    ("Daily Quant Report", "데일리 퀀트 리포트"),
+    ("Regular Report", "정규 리포트"),
+    ("Morning Briefing", "오전 브리핑"),
+    ("Closing Analysis", "마감 분석"),
+    ("Generated at:", "생성 시각:"),
+    ("Sections:", "섹션 수:"),
+    ("As of (KST):", "기준 시각:"),
+    ("Table Freshness (lag_days)", "테이블 최신성(지연 일수)"),
+    ("Zero-Volume Guardrail", "거래량 0 종목 점검"),
+    ("Pipeline Alerts (recent 3 days)", "최근 3일 파이프라인 경고"),
+    ("lag_days=", "지연 "),
+    ("Risk-On", "위험자산 선호"),
+    ("Risk-Off", "안전자산 선호"),
+    ("BUY", "매수"),
+    ("HOLD", "보유"),
+    ("SELL", "매도"),
+    ("WARN", "경고"),
+    ("FAILED", "실패"),
+    ("FAIL", "실패"),
+    ("records=", "처리건수 "),
+    ("error=", "오류 "),
+    ("Report 작성 시간:", "생성 시각:"),
+    ("🔴", "1) 공격 포인트"),
+    ("🔵", "2) 보수 포인트"),
+    ("⚖️", "3) 최종 결론"),
+    ("⚖", "3) 최종 결론"),
+    ("긍정적인 포인트:", ""),
+    ("보수적인 포인트:", ""),
+    ("최종 결론:", ""),
+    ("Zero volume guardrail", "거래량 0 종목 점검"),
+    ("base_date=", "기준일 "),
+)
 
 
 class TelegramSender:
@@ -72,12 +111,13 @@ class TelegramSender:
     @classmethod
     def _build_message_chunks(cls, report_text: str) -> List[str]:
         normalized = cls._normalize_report_text(report_text)
+        normalized = cls._humanize_text(normalized)
         title, generated_at, sections = cls._extract_sections(normalized)
 
         intro_lines = [title]
         if generated_at:
-            intro_lines.append(f"Generated at: {generated_at}")
-        intro_lines.append(f"Sections: {len(sections)}")
+            intro_lines.append(f"생성 시각: {generated_at}")
+        intro_lines.append(f"섹션 수: {len(sections)}")
         intro = "\n".join(intro_lines).strip()
 
         if not sections:
@@ -92,7 +132,7 @@ class TelegramSender:
         total_parts = len(section_blocks)
         chunks = []
         for idx, block in enumerate(section_blocks, 1):
-            prefix = f"[Report Part {idx}/{total_parts}]"
+            prefix = f"[리포트 {idx}/{total_parts}]"
             if idx == 1:
                 chunk = f"{intro}\n\n{prefix}\n{block}".strip()
             else:
@@ -119,6 +159,148 @@ class TelegramSender:
 
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+    @classmethod
+    def _humanize_text(cls, text: str) -> str:
+        lines = text.splitlines()
+        humanized_lines = []
+
+        for line in lines:
+            updated = line.strip()
+            if not updated:
+                humanized_lines.append("")
+                continue
+
+            if updated.startswith(("Report 작성 시간:", "생성 시각:")):
+                continue
+
+            updated = cls._humanize_line(updated)
+            if updated:
+                humanized_lines.append(updated)
+
+        result = "\n".join(humanized_lines)
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()
+
+    @classmethod
+    def _humanize_line(cls, line: str) -> str:
+        updated = line
+
+        if updated in SECTION_TITLE_MAP:
+            updated = SECTION_TITLE_MAP[updated]
+
+        for src, dest in TEXT_REPLACEMENTS:
+            updated = updated.replace(src, dest)
+
+        if "데일리 퀀트 리포트" in updated:
+            if "정규 리포트" in updated:
+                updated = "데일리 퀀트 리포트 - 정규 리포트"
+            elif "오전 브리핑" in updated:
+                updated = "데일리 퀀트 리포트 - 오전 브리핑"
+            elif "마감 분석" in updated:
+                updated = "데일리 퀀트 리포트 - 마감 분석"
+            else:
+                updated = "데일리 퀀트 리포트"
+
+        updated = cls._format_datetime_strings(updated)
+        updated = cls._format_numeric_tokens(updated)
+        updated = cls._cleanup_line(updated)
+        return updated
+
+    @staticmethod
+    def _format_datetime_strings(text: str) -> str:
+        text = re.sub(
+            r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?\+09:00",
+            r"\1 \2 (KST)",
+            text,
+        )
+        text = re.sub(
+            r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2})?Z",
+            r"\1 \2 (UTC)",
+            text,
+        )
+        return text
+
+    @classmethod
+    def _format_numeric_tokens(cls, text: str) -> str:
+        text = cls._format_ratio_keywords(text)
+
+        def repl(match):
+            token = match.group(0)
+            start = match.start()
+            end = match.end()
+            prev_char = text[start - 1] if start > 0 else ""
+            next_char = text[end] if end < len(text) else ""
+
+            if prev_char == "-" or next_char == "-":
+                return token
+            if prev_char == "(" and next_char == ")" and re.fullmatch(r"\d{6}", token):
+                return token
+
+            suffix = ""
+            core = token
+            if core.endswith("%"):
+                suffix = "%"
+                core = core[:-1]
+
+            try:
+                value = float(core.replace(",", ""))
+            except ValueError:
+                return token
+
+            if suffix == "%":
+                formatted = cls._format_percent_value(value)
+            elif prev_char == "(" and next_char == ")":
+                formatted = f"{int(round(value)):,}" if float(value).is_integer() else cls._trim_decimal(value, digits=2)
+            elif abs(value) >= 1000 or float(value).is_integer():
+                formatted = f"{int(round(value)):,}"
+            else:
+                formatted = cls._trim_decimal(value, digits=2)
+
+            return f"{formatted}{suffix if suffix and '%' not in formatted else ''}"
+
+        return re.sub(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?%?", repl, text)
+
+    @staticmethod
+    def _format_percent_value(value: float) -> str:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+
+    @classmethod
+    def _format_ratio_keywords(cls, text: str) -> str:
+        pattern = re.compile(
+            r"((?:수익률|변화율|등락률|상승률|하락률)\s*)([-+]?\d+\.\d+)(?![%\d])"
+        )
+
+        def repl(match):
+            label = match.group(1)
+            value = float(match.group(2))
+            if abs(value) <= 1:
+                formatted = f"{value * 100:.2f}".rstrip("0").rstrip(".")
+                return f"{label}{formatted}%"
+            return match.group(0)
+
+        return pattern.sub(repl, text)
+
+    @staticmethod
+    def _trim_decimal(value: float, digits: int = 2) -> str:
+        return f"{value:.{digits}f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _cleanup_line(text: str) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"지연 N/A", "지연 확인 불가", text)
+        text = text.replace("? ? ?", "")
+        text = text.replace("? ?", "")
+        text = re.sub(r"\s*-\s*(\d)", r" -\1", text)
+        text = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", text)
+        text = re.sub(r"\(\s*-\s*(\d[\d,]*)\)", r"(-\1)", text)
+        text = re.sub(r"\(\s*(\d[\d,]*)\s*\)", r"(\1)", text)
+        text = re.sub(r"1\)\s*공격 포인트\s*", "1) 공격 포인트: ", text)
+        text = re.sub(r"2\)\s*보수 포인트\s*", "2) 보수 포인트: ", text)
+        text = re.sub(r"3\)\s*최종 결론\s*", "3) 최종 결론: ", text)
+        text = re.sub(r":\s*:", ": ", text)
+        text = re.sub(r"\s+\)", ")", text)
+        return text
 
     @staticmethod
     def _extract_sections(text: str):
