@@ -90,9 +90,12 @@ def _render_data_guardrails_md(data_guardrails: dict) -> str:
         for item in alerts[:10]:
             error_message = item.get("error_message")
             error_suffix = f" | error={error_message}" if error_message else ""
+            occurrences = item.get("occurrences")
+            occurrences_suffix = f" | occurrences={occurrences}" if occurrences else ""
             alert_lines.append(
                 f"- `{item.get('target_date')}` | `{item.get('job_name')}` | "
-                f"`{item.get('status')}` | records={item.get('records_processed')}{error_suffix}"
+                f"`{item.get('status')}` | records={item.get('records_processed')}"
+                f"{occurrences_suffix}{error_suffix}"
             )
         alerts_block = "\n".join(alert_lines)
     else:

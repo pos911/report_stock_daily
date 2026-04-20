@@ -455,10 +455,22 @@ class SupabaseReader:
                 .limit(120)
                 .execute()
             )
+            grouped_alerts = {}
             for row in logs_resp.data or []:
                 status = (row.get("status") or "").upper()
                 if status in {"WARN", "FAIL", "FAILED", "ERROR"}:
-                    log_alerts.append(row)
+                    key = (row.get("target_date"), row.get("job_name"), status)
+                    if key not in grouped_alerts:
+                        grouped_alerts[key] = {
+                            **row,
+                            "status": status,
+                            "occurrences": 1,
+                        }
+                    else:
+                        grouped_alerts[key]["occurrences"] += 1
+                        if row.get("error_message") and not grouped_alerts[key].get("error_message"):
+                            grouped_alerts[key]["error_message"] = row.get("error_message")
+            log_alerts = list(grouped_alerts.values())
             log_alerts = log_alerts[:20]
         except Exception as e:
             print(f"[WARNING] pipeline_run_logs 조회 실패: {e}")
