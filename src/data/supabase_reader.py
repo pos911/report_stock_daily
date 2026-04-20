@@ -145,14 +145,14 @@ class SupabaseReader:
             return self._get_latest_base_date(table_name)
         return self._get_latest_base_date(table_name)
 
-    def _fetch_latest_row_by_date(self, table_name: str, base_date: str):
+    def _fetch_latest_row_by_date(self, table_name: str, base_date: str, select_cols: str = "*"):
         """지정한 base_date 행을 조회하고 forward fill 후 마지막 레코드를 반환한다."""
         if not base_date:
             return None
         try:
             resp = (
                 self.client.table(table_name)
-                .select("*")
+                .select(select_cols)
                 .eq("base_date", base_date)
                 .execute()
             )
@@ -286,9 +286,16 @@ class SupabaseReader:
         # 1-b. normalized_global_macro_daily (consumer spec 핵심)
         try:
             latest_global_macro_date = self._get_latest_base_date_available("normalized_global_macro_daily", as_of_utc)
+            req_cols = (
+                "base_date, kospi, kospi_change_rate, kosdaq, kosdaq_change_rate, "
+                "kospi_individual_net_buy, kospi_foreign_net_buy, kospi_institutional_net_buy, "
+                "kosdaq_individual_net_buy, kosdaq_foreign_net_buy, kosdaq_institutional_net_buy, "
+                "nasdaq, nasdaq_change_rate, sp500, sp500_change_rate"
+            )
             results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
                 "normalized_global_macro_daily",
                 latest_global_macro_date,
+                select_cols=req_cols
             )
         except Exception as e:
             print(f"[WARNING] normalized_global_macro_daily 조회 실패: {e}")

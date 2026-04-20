@@ -4,7 +4,8 @@ on:
   schedule:
     # ── KST → UTC 변환 (KST = UTC+9) ──────────────────────────────────────
     # 07:00 KST = 22:00 UTC (전일)  → Morning Report
-    - cron: '0 22 * * 1-5'
+    # KST 월~금 오전 실행을 맞추려면 UTC 일~목 저녁에 돌아야 함
+    - cron: '0 22 * * 0-4'
     # 11:00 KST = 02:00 UTC         → Regular Report
     - cron: '0 2 * * 1-5'
     # 13:30 KST = 04:30 UTC         → Regular Report
@@ -30,7 +31,7 @@ jobs:
   morning-report:
     name: Morning Report (07:00 KST)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 22 * * 1-5'
+    if: github.event_name == 'schedule' && github.event.schedule == '0 22 * * 0-4'
 
     steps:
       - uses: actions/checkout@v3
@@ -45,6 +46,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Apply schema migrations if present
+        run: |
+          if [ -f scripts/apply_schema_migrations.py ]; then
+            python scripts/apply_schema_migrations.py
+          else
+            echo "scripts/apply_schema_migrations.py not found; skipping schema migration."
+          fi
 
       - name: Inject API Keys & Run Morning Report
         env:
@@ -112,6 +121,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Apply schema migrations if present
+        run: |
+          if [ -f scripts/apply_schema_migrations.py ]; then
+            python scripts/apply_schema_migrations.py
+          else
+            echo "scripts/apply_schema_migrations.py not found; skipping schema migration."
+          fi
 
       - name: Inject API Keys & Run Closing Report
         env:
@@ -185,6 +202,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Apply schema migrations if present
+        run: |
+          if [ -f scripts/apply_schema_migrations.py ]; then
+            python scripts/apply_schema_migrations.py
+          else
+            echo "scripts/apply_schema_migrations.py not found; skipping schema migration."
+          fi
 
       - name: Inject API Keys & Run Regular Report
         env:

@@ -296,6 +296,7 @@ def main():
         momentum_data=macro_market_data.get("momentum"),
         data_guardrails=data_guardrails,
         news_text=news_text,
+        korean_market_snapshot=macro_market_data.get("normalized_global_macro_daily"),
         generation_time=generation_time_str,
         report_type=report_type,
     )
@@ -309,6 +310,7 @@ def main():
             logger.info("STEP 2-1: 거래대금 상위 종목 요약 생성 중...")
             top_volume_md = analyzer.generate_top_volume_analysis(
                 top_volume_data=top_volume_data,
+                market_summary=market_summary_md,
                 report_type=report_type,
             )
 

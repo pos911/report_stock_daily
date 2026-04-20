@@ -13,8 +13,10 @@ load_dotenv()
 
 
 class GeminiAnalyzer:
-    MAX_RETRIES = 4
+    MAX_RETRIES = 2
+    FALLBACK_RETRIES = 2
     BASE_RETRY_SECONDS = 5
+    NEWS_BATCH_CHARS = 9000
     STOCK_BATCH_SIZE = 4
     TOP_VOLUME_PER_MARKET = 3
     FEATURE_PRIORITY = (
@@ -54,6 +56,7 @@ class GeminiAnalyzer:
 
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
         self.system_instruction = os.getenv("GEMINI_SYSTEM_INSTRUCTION")
+        configured_fallbacks = []
 
         if os.path.exists(settings_config_path):
             with open(settings_config_path, "r", encoding="utf-8") as f:
@@ -62,6 +65,17 @@ class GeminiAnalyzer:
                 self.system_instruction = settings.get(
                     "system_instruction", self.system_instruction
                 )
+                configured_fallbacks = settings.get("fallback_model_names", [])
+
+        env_fallbacks = os.getenv("GEMINI_FALLBACK_MODEL_NAMES", "")
+        fallback_model_names = [
+            name.strip()
+            for name in env_fallbacks.split(",")
+            if name.strip()
+        ] or configured_fallbacks
+        self.fallback_model_names = [
+            name for name in fallback_model_names if name and name != self.model_name
+        ]
 
         if not self.system_instruction:
             self.system_instruction = "You are a financial analyst."
@@ -70,6 +84,16 @@ class GeminiAnalyzer:
             model_name=self.model_name,
             system_instruction=self.system_instruction,
         )
+        self.fallback_models = [
+            (
+                model_name,
+                genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=self.system_instruction,
+                ),
+            )
+            for model_name in self.fallback_model_names
+        ]
 
     def _build_silent_skip_rules(self):
         """Common silent-skip rules shared across prompts."""
@@ -82,36 +106,91 @@ class GeminiAnalyzer:
 - If any metric or section has no data, do not mention it. Simply omit and analyze only what is available.
 """
 
+    def _build_silent_skip_rules(self):
+        """Common silent-skip rules shared across prompts."""
+        return """
+## 공통 엄격 금지 사항 (Silent Skip 원칙)
+- "데이터가 없습니다", "데이터가 부족합니다", "제공되지 않아", "N/A", "Not available" 같은 표현 금지.
+- 데이터가 없는 섹션/지표/종목은 아무 언급 없이 조용히 생략.
+- 마크다운 최상위 헤더 `#`, `##` 금지. Python 조립 단계가 구조 헤더를 담당하므로 `###` 이하만 사용.
+- 인사말, 상황 설명식 서론, 전체 결론 금지. 바로 본문만 작성.
+- If any metric or section has no data, do not mention it. Simply omit and analyze only what is available.
+"""
+
+    @staticmethod
+    def _sanitize_llm_text(text: str) -> str:
+        if not text:
+            return ""
+
+        blocked_fragments = (
+            "N/A",
+            "데이터가 없어",
+            "데이터가 없",
+            "데이터가 부족",
+            "제공된 데이터",
+            "제공되지 않아",
+            "미제공",
+            "한국 지수",
+            "판단이 어렵",
+            "구체적인 투자 판단은 어렵",
+        )
+        cleaned_lines = []
+        for line in text.splitlines():
+            if any(fragment in line for fragment in blocked_fragments):
+                continue
+            cleaned_lines.append(line.rstrip())
+
+        cleaned = "\n".join(cleaned_lines)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
     def _call_model(self, prompt: str, temperature: float = 0.7) -> str:
         """Shared Gemini API wrapper."""
         last_error = None
         prompt_chars = len(prompt)
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            try:
-                print(
-                    f"Gemini request: attempt {attempt}/{self.MAX_RETRIES}, "
-                    f"prompt_chars={prompt_chars}, temperature={temperature}"
-                )
-                response = self.model.generate_content(
-                    contents=[{"role": "user", "parts": [{"text": prompt}]}],
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=temperature
-                    ),
-                )
-                return response.text
-            except Exception as exc:
-                last_error = exc
-                error_text = str(exc)
-                is_retryable = "429" in error_text or "ResourceExhausted" in error_text
-                if not is_retryable or attempt == self.MAX_RETRIES:
-                    raise
+        model_candidates = [(self.model_name, self.model, self.MAX_RETRIES)] + [
+            (model_name, model, self.FALLBACK_RETRIES)
+            for model_name, model in self.fallback_models
+        ]
 
-                sleep_seconds = self.BASE_RETRY_SECONDS * (2 ** (attempt - 1))
-                print(
-                    f"Warning: Gemini call retry {attempt}/{self.MAX_RETRIES} "
-                    f"after {sleep_seconds}s due to: {exc}"
-                )
-                time.sleep(sleep_seconds)
+        for model_index, (model_name, model, max_retries) in enumerate(model_candidates):
+            is_last_model = model_index == len(model_candidates) - 1
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(
+                        f"Gemini request: model={model_name}, attempt {attempt}/{max_retries}, "
+                        f"prompt_chars={prompt_chars}, temperature={temperature}"
+                    )
+                    response = model.generate_content(
+                        contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=temperature
+                        ),
+                    )
+                    return self._sanitize_llm_text(response.text)
+                except Exception as exc:
+                    last_error = exc
+                    error_text = str(exc)
+                    is_retryable = "429" in error_text or "ResourceExhausted" in error_text
+                    if not is_retryable:
+                        raise
+
+                    if attempt == max_retries:
+                        if is_last_model:
+                            raise
+                        next_model = model_candidates[model_index + 1][0]
+                        print(
+                            f"Warning: Gemini model={model_name} exhausted with 429. "
+                            f"Trying fallback model={next_model}."
+                        )
+                        break
+
+                    sleep_seconds = self.BASE_RETRY_SECONDS * (2 ** (attempt - 1))
+                    print(
+                        f"Warning: Gemini call retry {attempt}/{max_retries} "
+                        f"after {sleep_seconds}s due to: {exc}"
+                    )
+                    time.sleep(sleep_seconds)
 
         raise last_error
 
@@ -122,6 +201,16 @@ class GeminiAnalyzer:
 
         preferred_keys = (
             "base_date",
+            "kospi",
+            "kospi_change_rate",
+            "kosdaq",
+            "kosdaq_change_rate",
+            "kospi_individual_net_buy",
+            "kospi_foreign_net_buy",
+            "kospi_institutional_net_buy",
+            "kosdaq_individual_net_buy",
+            "kosdaq_foreign_net_buy",
+            "kosdaq_institutional_net_buy",
             "usdkrw",
             "dxy",
             "us10y",
@@ -131,9 +220,9 @@ class GeminiAnalyzer:
             "copper",
             "vix",
             "sp500",
+            "sp500_change_rate",
             "nasdaq",
-            "kospi",
-            "kosdaq",
+            "nasdaq_change_rate",
         )
         compact = {key: macro_data.get(key) for key in preferred_keys if macro_data.get(key) is not None}
         return compact or macro_data
@@ -300,6 +389,25 @@ class GeminiAnalyzer:
         return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
 
     @staticmethod
+    def _chunk_text_by_lines(text: str, max_chars: int):
+        chunks = []
+        current = []
+        current_len = 0
+
+        for line in (text or "").splitlines():
+            line_len = len(line) + 1
+            if current and current_len + line_len > max_chars:
+                chunks.append("\n".join(current).strip())
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += line_len
+
+        if current:
+            chunks.append("\n".join(current).strip())
+        return [chunk for chunk in chunks if chunk]
+
+    @staticmethod
     def _extract_section(text: str, heading: str) -> str:
         if not text:
             return ""
@@ -334,6 +442,94 @@ class GeminiAnalyzer:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
 
+    def _generate_market_snapshot_summary(
+        self,
+        compact_macro_data,
+        compact_market_breadth,
+        compact_momentum,
+        compact_guardrails,
+        korean_market_snapshot,
+        generation_time,
+        report_type: str,
+    ) -> str:
+        prompt = f"""
+[Report Generation Info]
+- 작성 시각: {generation_time}
+- 리포트 유형: {report_type.upper()}
+
+[거시 지표]
+{json.dumps(compact_macro_data, ensure_ascii=False)}
+
+[시장 폭]
+{json.dumps(compact_market_breadth, ensure_ascii=False)}
+
+[모멘텀 변화율]
+{json.dumps(compact_momentum, ensure_ascii=False)}
+
+[한국 시장 스냅샷]
+{json.dumps(korean_market_snapshot or {}, ensure_ascii=False)}
+
+[Data Quality Guardrails]
+{json.dumps(compact_guardrails, ensure_ascii=False)}
+
+[System Instruction]
+국내 지수, 투자자별 수급, 미국 지수, 매크로 데이터를 바탕으로 시장 상태를 판단하라. 뉴스 해석은 다음 단계에서 별도로 한다.
+
+### 출력 구조
+- `### 시장 한줄 요약`
+- `### 오늘의 시장 판단`
+
+### 작성 규칙
+1. `### 시장 한줄 요약`의 첫 문장은 반드시 한 문장으로 오늘 시장 분위기를 요약하라.
+2. 그 아래에 KOSPI, KOSDAQ 종가와 등락(전일 대비), 개인/외인/기관 동향(순매수), 나스닥 지수 등락폭을 bullet로 명확하게 정리하라. (제공된 값만 사용)
+3. 지수와 수급 숫자 바로 아래에 `평가:` 한 줄을 붙여 이 수치들이 종합적으로 어떤 의미인지 설명하라.
+4. `### 오늘의 시장 판단`에는 현재 시장이 `Risk-On` 인지 `Risk-Off` 인지 혹은 `중립` 인지 명시하고, 왜 그렇게 판단했는지(예: "Risk-Off 라는데 이게 맞는 판단인지") 데이터를 근거로 짧은 의견을 덧붙여라.
+
+{self._build_silent_skip_rules()}
+마크다운 형식으로 작성해줘.
+"""
+        return self._call_model(prompt, temperature=0.5).strip()
+
+    def _generate_news_implications_summary(
+        self,
+        compact_news,
+        market_snapshot_md,
+        compact_momentum,
+        report_type: str,
+    ) -> str:
+        prompt = f"""
+[Report Generation Info]
+- 리포트 유형: {report_type.upper()}
+
+[시장/수급 판단 요약]
+{market_snapshot_md}
+
+[StockData 요약]
+{json.dumps(compact_momentum, ensure_ascii=False)}
+
+[Google Docs News Context]
+{compact_news}
+
+[System Instruction]
+Google Docs 뉴스와 앞 단계의 시장/수급 판단을 종합해 투자자가 읽을 수 있는 핵심 해석을 작성하라.
+
+### 출력 구조
+- `### 뉴스 요약`
+- `### 핵심 포인트`
+- `### 투자 시사점`
+
+### 작성 규칙
+1. `### 뉴스 요약`은 핵심 뉴스가 누락되지 않게 서로 다른 이슈를 3~5개로 묶어라.
+2. `### 핵심 포인트`는 뉴스, 시장 지수, 수급 등의 평가를 전체적으로 종합해서 3개 안팎의 bullet로 정리하라.
+3. `### 투자 시사점`은 제공된 StockData의 모멘텀, 수급, 밸류에이션, 거래대금 등의 다양한 데이터를 투자공학 관점에서 분석하고, 위 핵심 포인트에서 뉴스와 종합한 내용을 기초로 2~3개만 제시하라.
+4. 데이터 품질 문제는 별도 본문 섹션으로 만들지 말고, 꼭 필요한 경우 마지막 bullet에 짧게만 반영하라.
+5. 새 사실을 지어내지 말고, 입력에 없는 종목/수치는 추가하지 마라.
+
+{self._build_silent_skip_rules()}
+마크다운 형식으로 작성해줘.
+"""
+        return self._call_model(prompt, temperature=0.5).strip()
+
     def generate_market_summary(
         self,
         macro_data,
@@ -341,6 +537,7 @@ class GeminiAnalyzer:
         momentum_data,
         data_guardrails,
         news_text,
+        korean_market_snapshot,
         generation_time,
         report_type: str = "regular",
     ):
@@ -352,6 +549,25 @@ class GeminiAnalyzer:
         compact_momentum = self._compact_momentum_data(momentum_data)
         compact_guardrails = self._compact_guardrails(data_guardrails)
         compact_news = self._compact_news_context(news_text)
+
+        market_snapshot_md = self._generate_market_snapshot_summary(
+            compact_macro_data=compact_macro_data,
+            compact_market_breadth=compact_market_breadth,
+            compact_momentum=compact_momentum,
+            compact_guardrails=compact_guardrails,
+            korean_market_snapshot=korean_market_snapshot,
+            generation_time=generation_time,
+            report_type=report_type,
+        )
+        news_implications_md = self._generate_news_implications_summary(
+            compact_news=compact_news,
+            market_snapshot_md=market_snapshot_md,
+            compact_momentum=compact_momentum,
+            report_type=report_type,
+        )
+        return "\n\n".join(
+            part for part in (market_snapshot_md, news_implications_md) if part
+        ).strip()
 
         prompt = f"""
 [Report Generation Info]
@@ -367,6 +583,9 @@ class GeminiAnalyzer:
 [모멘텀 변화율]
 {json.dumps(compact_momentum, indent=2, ensure_ascii=False)}
 
+[한국 시장 스냅샷]
+{json.dumps(korean_market_snapshot or {}, indent=2, ensure_ascii=False)}
+
 [Data Quality Guardrails]
 {json.dumps(compact_guardrails, indent=2, ensure_ascii=False)}
 
@@ -374,7 +593,7 @@ class GeminiAnalyzer:
 {compact_news}
 
 [System Instruction]
-오늘 시장의 큰 방향과 핵심 뉴스를 한 번에 간결하게 요약하라.
+오늘 시장의 큰 방향, 국내 지수/수급, 해외 지수, 핵심 뉴스를 종합해 금융시장 관점으로 요약하라.
 
 ### 출력 구조
 - `### 시장 한줄 요약`
@@ -384,18 +603,66 @@ class GeminiAnalyzer:
 - `### 오늘의 시장 판단`
 
 ### 작성 규칙
-1. 긴 숫자 나열보다 해석 중심으로 써라.
-2. 핵심 포인트는 3개 안팎의 bullet로 제한하라.
-3. 뉴스 요약은 3개 안팎의 핵심 이슈만 남겨라.
-4. 투자 시사점은 국내 투자자가 바로 이해할 수 있게 2~3개만 제시하라.
-5. `### 오늘의 시장 판단`에는 반드시 `Risk-On`, `Risk-Off`, `중립` 중 하나를 명시하라.
+1. `### 시장 한줄 요약`의 첫 문장은 반드시 한 문장으로 오늘 시장 분위기를 요약하라.
+2. 그 바로 아래에 KOSPI, KOSDAQ, 개인/외인/기관 수급, Nasdaq 종가/등락폭을 bullet로 정리하라. 제공된 값만 사용하고 없으면 조용히 생략하라.
+3. 지수와 수급 숫자 아래에 `평가:` 한 줄을 붙여 이 조합이 무엇을 의미하는지 설명하라.
+4. `### 뉴스 요약`은 Google Docs 뉴스 원문을 정제한 입력을 기반으로 작성한다. 핵심 뉴스가 누락되지 않게 서로 다른 이슈를 3~5개로 묶어라.
+5. `### 핵심 포인트`는 뉴스, 시장 지수, 수급, 글로벌 매크로 평가를 종합해 3개 안팎의 bullet로 정리하라.
+6. `### 투자 시사점`은 StockData의 모멘텀, 수급, 밸류에이션, 거래대금, 변동성 데이터를 투자공학 관점으로 해석하고, 위 핵심 포인트와 연결해 2~3개만 제시하라.
+7. `### 오늘의 시장 판단`에는 반드시 `Risk-On`, `Risk-Off`, `중립` 중 하나를 명시하되, 지수·수급·뉴스가 엇갈리면 무리하게 Risk-Off/Risk-On으로 단정하지 말고 `중립`을 사용하라.
 
 {self._build_silent_skip_rules()}
 마크다운 형식으로 작성해줘.
 """
         return self._call_model(prompt, temperature=0.6)
 
-    def generate_top_volume_analysis(self, top_volume_data, report_type: str = "regular"):
+    def summarize_news_context(self, news_text: str, report_type: str = "regular") -> str:
+        """
+        Summarize normalized news in batches before the main market prompt.
+        This keeps all news items represented while reducing the heavy first Gemini call.
+        """
+        if not news_text:
+            return ""
+
+        chunks = self._chunk_text_by_lines(news_text, self.NEWS_BATCH_CHARS)
+        if not chunks:
+            return ""
+
+        summaries = []
+        for idx, chunk in enumerate(chunks, 1):
+            prompt = f"""
+[Report Generation Info]
+- 리포트 유형: {report_type.upper()}
+- 뉴스 배치: {idx}/{len(chunks)}
+
+[Normalized Google Docs News Items]
+{chunk}
+
+[System Instruction]
+아래 뉴스 항목들을 투자자가 읽을 수 있게 압축하라.
+
+### 출력 구조
+- `### 뉴스 배치 요약`
+
+### 작성 규칙
+1. 원문 항목을 빠뜨리지 말고, 같은 이슈는 묶어서 정리하라.
+2. 각 bullet은 `- 이슈: 시장 영향` 형식으로 쓴다.
+3. 새 사실을 지어내지 말고, 원문에 없는 종목/수치는 추가하지 마라.
+4. 긴 서론, 인사말, 전체 결론은 금지한다.
+
+{self._build_silent_skip_rules()}
+마크다운 형식으로 작성해줘.
+"""
+            summaries.append(self._call_model(prompt, temperature=0.4).strip())
+
+        return "\n\n".join(summaries).strip()
+
+    def generate_top_volume_analysis(
+        self,
+        top_volume_data,
+        market_summary: str = "",
+        report_type: str = "regular",
+    ):
         """
         [Step 3] Top-volume names and smart-money angle.
         """
@@ -407,17 +674,20 @@ class GeminiAnalyzer:
 [Top Volume Stocks]
 {json.dumps(compact_top_volume, indent=2, ensure_ascii=False)}
 
+[Market/News Context]
+{market_summary}
+
 [System Instruction]
-거래대금 상위 종목에서 오늘 눈에 띄는 이름만 골라 간결하게 정리하라.
+거래대금 상위 종목에서 오늘 눈에 띄는 이름을 고르고, 시장/뉴스 맥락상 왜 거래대금이 상위로 몰렸는지 해석하라.
 
 ### 출력 구조
 - `### 거래대금 상위 종목`
-- 종목별 bullet: `- 종목명(코드): 한 줄 요약`
+- 종목별 bullet: `- 종목명(코드): 왜 거래대금이 상위인지 설명`
 
 ### 작성 규칙
 1. 긴 서론은 금지한다.
-2. `foreign_flow_zscore`, 수익률, 밸류에이션 중 의미 있는 근거만 짧게 사용하라.
-3. 업종 흐름이나 테마 연결은 한 문장 이내로 제한하라.
+2. 뉴스/시장 맥락과 연결하여 특정 종목에 거래대금이 왜 쏠렸는지 그 이유와 의미를 뉴스/모멘텀을 통해 알려줘라.
+3. `foreign_flow_zscore`, 수익률, 밸류에이션 중 의미 있는 근거만 짧게 포함하라. 단, 근거 없는 추정은 금지한다.
 4. `Report 작성 시간`, `### 매크로 분석`, `### 최종 투자 전략` 같은 추가 섹션은 절대 쓰지 마라.
 
 {self._build_silent_skip_rules()}

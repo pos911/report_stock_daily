@@ -8,7 +8,8 @@ from src.utils import config
 NEWS_FETCH_TIMEOUT = 30
 NEWS_FETCH_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
-MAX_NEWS_ITEM_CHARS = 240
+MAX_NEWS_ITEM_CHARS = 120
+MAX_NEWS_CONTEXT_CHARS = 3000
 
 
 def prepare_news_context(news_text: str) -> str:
@@ -48,6 +49,15 @@ def prepare_news_context(news_text: str) -> str:
             flush()
             current = []
             continue
+        if (
+            line.startswith(("갱신 시각:", "시간:", "유지 기준:"))
+            or line.startswith("{\"type\":\"text\"")
+            or line.startswith("📢")
+            or set(line) <= {"_", "-", "=", " "}
+        ):
+            continue
+        if not line.startswith("["):
+            continue
 
         if current and not raw_line.startswith((" ", "\t", "-", "•", "*")):
             flush()
@@ -59,9 +69,29 @@ def prepare_news_context(news_text: str) -> str:
 
     if not items:
         fallback = " ".join(text.split())
-        return fallback[:4000].rstrip() + ("…" if len(fallback) > 4000 else "")
+        return fallback[:MAX_NEWS_CONTEXT_CHARS].rstrip() + (
+            "…" if len(fallback) > MAX_NEWS_CONTEXT_CHARS else ""
+        )
 
-    return "\n".join(f"- {item}" for item in items)
+    max_item_chars = MAX_NEWS_ITEM_CHARS
+    while max_item_chars >= 60:
+        rendered_items = []
+        for item in items:
+            shortened = item
+            if len(shortened) > max_item_chars:
+                shortened = shortened[: max_item_chars - 1].rstrip() + "…"
+            rendered_items.append(f"- {shortened}")
+
+        rendered = "\n".join(rendered_items)
+        if len(rendered) <= MAX_NEWS_CONTEXT_CHARS:
+            return rendered
+        max_item_chars -= 20
+
+    rendered = "\n".join(f"- {item[:59].rstrip()}…" for item in items)
+    if len(rendered) <= MAX_NEWS_CONTEXT_CHARS:
+        return rendered
+
+    return rendered[:MAX_NEWS_CONTEXT_CHARS].rstrip() + "\n- (뉴스 항목이 많아 헤드라인 중심으로 압축됨)"
 
 
 def fetch_news_document():
