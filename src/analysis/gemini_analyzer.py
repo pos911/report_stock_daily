@@ -39,46 +39,32 @@ class GeminiAnalyzer:
     )
 
     def __init__(self, settings_config_path="config/analyzer_settings.json"):
-        """
-        Initialize Gemini API and load model settings.
-        Priority for API Key: 1. Env Var, 2. config/api_keys.json
-        Priority for Settings: 1. analyzer_settings.json, 2. Env Vars, 3. Defaults
-        """
         self.api_key = config.get("api_key", section="gemini")
-
         if not self.api_key:
-            raise ValueError(
-                "Gemini API Key must be provided via config/api_keys.json "
-                "or GEMINI_API_KEY environment variable."
-            )
+            raise ValueError("Gemini API Key must be provided")
 
         self.client = genai.Client(api_key=self.api_key)
+        self.system_instruction = os.getenv("GEMINI_SYSTEM_INSTRUCTION", "You are a financial analyst.")
 
-        self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
-        self.system_instruction = os.getenv("GEMINI_SYSTEM_INSTRUCTION")
-        configured_fallbacks = []
+        self.model_name = "gemini-2.0-flash"
+        self.fallback_model_names = ["gemini-1.5-flash"]
 
-        if os.path.exists(settings_config_path):
-            with open(settings_config_path, "r", encoding="utf-8") as f:
-                settings = json.load(f).get("gemini", {})
-                self.model_name = settings.get("model_name", self.model_name)
-                self.system_instruction = settings.get(
-                    "system_instruction", self.system_instruction
-                )
-                configured_fallbacks = settings.get("fallback_model_names", [])
+        try:
+            # 404 에러 방지를 위한 동적 모델 탐색
+            available_models = [m.name for m in self.client.models.list()]
+            pro_models = [m for m in available_models if "pro" in m and "vision" not in m]
+            flash_models = [m for m in available_models if "flash" in m and "vision" not in m]
 
-        env_fallbacks = os.getenv("GEMINI_FALLBACK_MODEL_NAMES", "")
-        fallback_model_names = [
-            name.strip()
-            for name in env_fallbacks.split(",")
-            if name.strip()
-        ] or configured_fallbacks
-        self.fallback_model_names = [
-            name for name in fallback_model_names if name and name != self.model_name
-        ]
+            if pro_models:
+                self.model_name = pro_models[0]
+                self.fallback_model_names = pro_models[1:] + flash_models
+            elif flash_models:
+                self.model_name = flash_models[0]
+                self.fallback_model_names = flash_models[1:]
 
-        if not self.system_instruction:
-            self.system_instruction = "You are a financial analyst."
+            print(f"Dynamic Model Selection: Main={self.model_name}, Fallbacks={self.fallback_model_names}", flush=True)
+        except Exception as e:
+            print(f"Failed to list models dynamically: {e}. Using defaults.", flush=True)
 
 
 
@@ -146,7 +132,8 @@ class GeminiAnalyzer:
                 try:
                     print(
                         f"Gemini request: model={model_name}, attempt {attempt}/{max_retries}, "
-                        f"prompt_chars={prompt_chars}, temperature={temperature}"
+                        f"prompt_chars={prompt_chars}, temperature={temperature}",
+                        flush=True,
                     )
                     response = self.client.models.generate_content(
                         model=model_name,
@@ -176,7 +163,8 @@ class GeminiAnalyzer:
                         next_model = model_candidates[model_index + 1][0]
                         print(
                             f"Warning: Gemini model={model_name} failed with {exc}. "
-                            f"Immediately trying fallback model={next_model}."
+                            f"Immediately trying fallback model={next_model}.",
+                            flush=True,
                         )
                         break # 내부 재시도 루프를 빠져나가 다음 모델 시도로 이동
 
@@ -184,7 +172,8 @@ class GeminiAnalyzer:
                     sleep_seconds = self.BASE_RETRY_SECONDS * (2 ** (attempt - 1))
                     print(
                         f"Warning: Gemini call retry {attempt}/{max_retries} "
-                        f"after {sleep_seconds}s due to: {exc}"
+                        f"after {sleep_seconds}s due to: {exc}",
+                        flush=True,
                     )
                     time.sleep(sleep_seconds)
 
