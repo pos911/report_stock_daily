@@ -3,7 +3,7 @@ import os
 import time
 import re
 
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 from src.utils import config
@@ -52,7 +52,7 @@ class GeminiAnalyzer:
                 "or GEMINI_API_KEY environment variable."
             )
 
-        genai.configure(api_key=self.api_key)
+        self.client = genai.Client(api_key=self.api_key)
 
         self.model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
         self.system_instruction = os.getenv("GEMINI_SYSTEM_INSTRUCTION")
@@ -80,20 +80,7 @@ class GeminiAnalyzer:
         if not self.system_instruction:
             self.system_instruction = "You are a financial analyst."
 
-        self.model = genai.GenerativeModel(
-            model_name=self.model_name,
-            system_instruction=self.system_instruction,
-        )
-        self.fallback_models = [
-            (
-                model_name,
-                genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=self.system_instruction,
-                ),
-            )
-            for model_name in self.fallback_model_names
-        ]
+
 
     def _build_silent_skip_rules(self):
         """Common silent-skip rules shared across prompts."""
@@ -148,12 +135,12 @@ class GeminiAnalyzer:
         """Shared Gemini API wrapper."""
         last_error = None
         prompt_chars = len(prompt)
-        model_candidates = [(self.model_name, self.model, self.MAX_RETRIES)] + [
-            (model_name, model, self.FALLBACK_RETRIES)
-            for model_name, model in self.fallback_models
+        model_candidates = [(self.model_name, self.MAX_RETRIES)] + [
+            (model_name, self.FALLBACK_RETRIES)
+            for model_name in self.fallback_model_names
         ]
 
-        for model_index, (model_name, model, max_retries) in enumerate(model_candidates):
+        for model_index, (model_name, max_retries) in enumerate(model_candidates):
             is_last_model = model_index == len(model_candidates) - 1
             for attempt in range(1, max_retries + 1):
                 try:
@@ -161,9 +148,11 @@ class GeminiAnalyzer:
                         f"Gemini request: model={model_name}, attempt {attempt}/{max_retries}, "
                         f"prompt_chars={prompt_chars}, temperature={temperature}"
                     )
-                    response = model.generate_content(
-                        contents=[{"role": "user", "parts": [{"text": prompt}]}],
-                        generation_config=genai.types.GenerationConfig(
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=genai.types.GenerateContentConfig(
+                            system_instruction=self.system_instruction,
                             temperature=temperature
                         ),
                     )
@@ -171,20 +160,27 @@ class GeminiAnalyzer:
                 except Exception as exc:
                     last_error = exc
                     error_text = str(exc)
-                    is_retryable = "429" in error_text or "ResourceExhausted" in error_text
-                    if not is_retryable:
+                    
+                    # 429(Rate Limit)와 404(Not Found) 에러 구분
+                    is_rate_limit = "429" in error_text or "ResourceExhausted" in error_text
+                    is_not_found = "404" in error_text or "not found" in error_text.lower()
+
+                    # 둘 다 아니면 즉시 에러 발생 (Fatal Error)
+                    if not (is_rate_limit or is_not_found):
                         raise
 
-                    if attempt == max_retries:
+                    # 404 에러이거나 재시도 횟수를 초과한 경우 -> 다음 Fallback 모델로 즉시 이동
+                    if is_not_found or attempt == max_retries:
                         if is_last_model:
                             raise
                         next_model = model_candidates[model_index + 1][0]
                         print(
-                            f"Warning: Gemini model={model_name} exhausted with 429. "
-                            f"Trying fallback model={next_model}."
+                            f"Warning: Gemini model={model_name} failed with {exc}. "
+                            f"Immediately trying fallback model={next_model}."
                         )
-                        break
+                        break # 내부 재시도 루프를 빠져나가 다음 모델 시도로 이동
 
+                    # 429 에러인 경우 -> 백오프 대기 후 동일 모델 재시도
                     sleep_seconds = self.BASE_RETRY_SECONDS * (2 ** (attempt - 1))
                     print(
                         f"Warning: Gemini call retry {attempt}/{max_retries} "
@@ -481,8 +477,9 @@ class GeminiAnalyzer:
 
 ### 작성 규칙
 1. `### 시장 한줄 요약`의 첫 문장은 반드시 한 문장으로 오늘 시장 분위기를 요약하라.
-2. 그 아래에 KOSPI, KOSDAQ 종가와 등락(전일 대비), 개인/외인/기관 동향(순매수), 나스닥 지수 등락폭을 bullet로 명확하게 정리하라. (제공된 값만 사용)
-3. 지수와 수급 숫자 바로 아래에 `평가:` 한 줄을 붙여 이 수치들이 종합적으로 어떤 의미인지 설명하라.
+2. 주요 증권사 시황 리포트 양식을 참고하여, 지수 및 지표명은 굵게 표시하고, 현재 수치와 전일 대비 변화율(%)을 시각적으로 돋보이게 작성하라. 
+   (작성 예시: `- **KOSPI**: 2,750.12 (+1.23%)` / `- **개인 순매수**: +1,500억`)
+3. 수치 나열 직후 `**[시장 평가]**` 항목을 추가하여, 현재 변화율이 주는 종합적인 의미를 한 줄로 요약하라.
 4. `### 오늘의 시장 판단`에는 현재 시장이 `Risk-On` 인지 `Risk-Off` 인지 혹은 `중립` 인지 명시하고, 왜 그렇게 판단했는지(예: "Risk-Off 라는데 이게 맞는 판단인지") 데이터를 근거로 짧은 의견을 덧붙여라.
 
 {self._build_silent_skip_rules()}
@@ -568,53 +565,6 @@ Google Docs 뉴스와 앞 단계의 시장/수급 판단을 종합해 투자자�
         return "\n\n".join(
             part for part in (market_snapshot_md, news_implications_md) if part
         ).strip()
-
-        prompt = f"""
-[Report Generation Info]
-- 작성 시각: {generation_time}
-- 리포트 유형: {report_type.upper()}
-
-[거시 지표]
-{json.dumps(compact_macro_data, indent=2, ensure_ascii=False)}
-
-[시장 폭]
-{json.dumps(compact_market_breadth, indent=2, ensure_ascii=False)}
-
-[모멘텀 변화율]
-{json.dumps(compact_momentum, indent=2, ensure_ascii=False)}
-
-[한국 시장 스냅샷]
-{json.dumps(korean_market_snapshot or {}, indent=2, ensure_ascii=False)}
-
-[Data Quality Guardrails]
-{json.dumps(compact_guardrails, indent=2, ensure_ascii=False)}
-
-[News Context]
-{compact_news}
-
-[System Instruction]
-오늘 시장의 큰 방향, 국내 지수/수급, 해외 지수, 핵심 뉴스를 종합해 금융시장 관점으로 요약하라.
-
-### 출력 구조
-- `### 시장 한줄 요약`
-- `### 핵심 포인트`
-- `### 뉴스 요약`
-- `### 투자 시사점`
-- `### 오늘의 시장 판단`
-
-### 작성 규칙
-1. `### 시장 한줄 요약`의 첫 문장은 반드시 한 문장으로 오늘 시장 분위기를 요약하라.
-2. 그 바로 아래에 KOSPI, KOSDAQ, 개인/외인/기관 수급, Nasdaq 종가/등락폭을 bullet로 정리하라. 제공된 값만 사용하고 없으면 조용히 생략하라.
-3. 지수와 수급 숫자 아래에 `평가:` 한 줄을 붙여 이 조합이 무엇을 의미하는지 설명하라.
-4. `### 뉴스 요약`은 Google Docs 뉴스 원문을 정제한 입력을 기반으로 작성한다. 핵심 뉴스가 누락되지 않게 서로 다른 이슈를 3~5개로 묶어라.
-5. `### 핵심 포인트`는 뉴스, 시장 지수, 수급, 글로벌 매크로 평가를 종합해 3개 안팎의 bullet로 정리하라.
-6. `### 투자 시사점`은 StockData의 모멘텀, 수급, 밸류에이션, 거래대금, 변동성 데이터를 투자공학 관점으로 해석하고, 위 핵심 포인트와 연결해 2~3개만 제시하라.
-7. `### 오늘의 시장 판단`에는 반드시 `Risk-On`, `Risk-Off`, `중립` 중 하나를 명시하되, 지수·수급·뉴스가 엇갈리면 무리하게 Risk-Off/Risk-On으로 단정하지 말고 `중립`을 사용하라.
-
-{self._build_silent_skip_rules()}
-마크다운 형식으로 작성해줘.
-"""
-        return self._call_model(prompt, temperature=0.6)
 
     def summarize_news_context(self, news_text: str, report_type: str = "regular") -> str:
         """
@@ -744,11 +694,11 @@ Google Docs 뉴스와 앞 단계의 시장/수급 판단을 종합해 투자자�
 3. `3) 최종 결론 (BUY/HOLD/SELL)`
 
 ### 작성 규칙
-1. 공격적인 포인트에는 모멘텀, 수급, 밸류에이션, 업황 중 강점만 압축해 적어라.
-2. 보수적인 포인트에는 리스크, 데이터 지연 가능성, 업황 역풍을 적어라.
-3. 결론은 종목마다 하나만 명시하라.
-4. 종목별 장문 서론은 금지하고 바로 핵심만 적어라.
-5. `Report 작성 시간`, `### 시장 한줄 요약`, `### 매크로 분석`, `### 최종 투자 전략` 같은 추가 섹션은 절대 쓰지 마라.
+1. 종목명(코드) 옆에 반드시 1일 수익률(return_1d) 등 변화율(%)을 괄호와 부호(+, -)를 포함해 명확히 표기하라. (예: `**삼성전자(005930)** (+1.50%)`)
+2. `1) 공격적인 포인트`: 상승을 기대할 수 있는 모멘텀, 수급(외인/기관), 밸류에이션 매력 등 긍정적 뷰를 강력하게 서술하라.
+3. `2) 최대한 보수적인 포인트`: 하방 리스크, 매크로 역풍, 수급 이탈 등 리스크 요소를 최대한 보수적인 관점에서 서술하라.
+4. `3) 최종 결론`: 위 두 가지 뷰를 검토한 후, (BUY / HOLD / SELL) 중 하나의 최종 결론을 도출하고 이유를 짧게 적어라.
+5. 장문 서론은 금지하고 바로 종목 핵심만 적어라.
 
 {self._build_silent_skip_rules()}
 마크다운 형식으로 작성해줘.

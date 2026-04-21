@@ -32,11 +32,19 @@ def _parse_args():
     parser.add_argument(
         "--type",
         dest="report_type",
-        choices=VALID_REPORT_TYPES,
         default="regular",
         help="리포트 유형: morning(07:00), closing(15:30), regular(기타). 기본값: regular",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    rt = args.report_type.strip().lower()
+    if rt in ("mornig", "morining"):
+        rt = "morning"
+    if rt not in VALID_REPORT_TYPES:
+        parser.error(f"invalid choice: '{args.report_type}' (choose from {', '.join(VALID_REPORT_TYPES)})")
+    
+    args.report_type = rt
+    return args
 
 
 def _validate_top_volume(top_volume_data: dict) -> bool:

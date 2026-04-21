@@ -31,7 +31,7 @@ jobs:
   morning-report:
     name: Morning Report (07:00 KST)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 22 * * 0-4'
+    if: github.event_name == 'schedule' && contains(github.event.schedule, '0 22')
 
     steps:
       - uses: actions/checkout@v3
@@ -106,7 +106,7 @@ jobs:
   closing-report:
     name: Closing Report (15:30 KST)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 6 * * 1-5'
+    if: github.event_name == 'schedule' && contains(github.event.schedule, '30 6')
 
     steps:
       - uses: actions/checkout@v3
@@ -183,9 +183,9 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       (github.event_name == 'schedule' && (
-        github.event.schedule == '0 2 * * 1-5' ||
-        github.event.schedule == '30 4 * * 1-5' ||
-        github.event.schedule == '30 5 * * 1-5'
+        contains(github.event.schedule, '0 2') ||
+        contains(github.event.schedule, '30 4') ||
+        contains(github.event.schedule, '30 5')
       )) ||
       github.event_name == 'workflow_dispatch'
 
