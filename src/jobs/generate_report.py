@@ -11,7 +11,6 @@ project_root = current_dir.parent.parent
 sys.path.append(str(project_root))
 
 from src.analysis.gemini_analyzer import GeminiAnalyzer
-from src.data.news_reader import fetch_news_document, prepare_news_context
 from src.data.supabase_reader import SupabaseReader
 from src.notification.telegram_sender import TelegramSender
 
@@ -277,8 +276,8 @@ def main():
         target_stocks_data = {}
 
     logger.info("4. 뉴스 문서 수집 중...")
-    raw_news_text = fetch_news_document()
-    news_text = prepare_news_context(raw_news_text)
+    raw_news_text = reader.fetch_news_document()
+    news_text = reader.prepare_news_context(raw_news_text)
 
     logger.info("5. 데이터 품질 가드레일 점검 중...")
     data_guardrails = reader.fetch_data_quality_guardrails()

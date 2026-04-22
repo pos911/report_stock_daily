@@ -3,3 +3,4 @@ pandas
 google-genai
 requests
 python-dotenv
+yfinance
