@@ -302,14 +302,10 @@ class SupabaseReader:
         # 1-b. normalized_global_macro_daily (consumer spec 핵심)
         try:
             latest_global_macro_date = self._get_latest_base_date_available("normalized_global_macro_daily", as_of_utc)
-            # 실제 존재하는 컬럼 위주로 조회 (kospi/kosdaq은 macro_series에서 주로 가져옴)
-            req_cols = (
-                "base_date, nasdaq, sp500, usdkrw, dxy, us10y, wti, vix, sox"
-            )
+            # KOSPI/KOSDAQ, 투자자별 수급, 해외 지수 컬럼이 계속 확장되므로 전체 row를 가져온다.
             results["normalized_global_macro_daily"] = self._fetch_latest_row_by_date(
                 "normalized_global_macro_daily",
                 latest_global_macro_date,
-                select_cols=req_cols
             )
         except Exception as e:
             print(f"[WARNING] normalized_global_macro_daily 조회 실패: {e}")
