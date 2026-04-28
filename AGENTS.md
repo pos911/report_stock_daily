@@ -6,6 +6,8 @@ Stock daily report generation system using Supabase data and Gemini AI analysis.
 
 ### Execution
 - **Run Daily Report Generation**: `python src/jobs/generate_report.py`
+- **Run Morning Market Brief**: `python src/jobs/generate_report.py --type morning`
+- **Run Formatter Tests**: `python -m unittest tests.test_formatters`
 - **Install Dependencies**: `pip install -r requirements.txt`
 
 ### Configuration Files
@@ -40,3 +42,4 @@ Environment-specific settings or those required for automated pipelines:
     - Python (`generate_report.py`) handles the structural assembly and layout headers.
 - **Aggressive vs Conservative View**: Stock analysis must avoid plain narrative lists. It strictly enforces a 3-step bullet point structure: `1) 공격적인 포인트`, `2) 최대한 보수적인 포인트`, `3) 최종 결론 (BUY/HOLD/SELL)`.
 - **Zero-Waste Prompting**: The LLM must NEVER output excuses about missing data. If data is absent, the model must silently skip it. Do not say "Data is not provided" or "결측치입니다".
+- **Morning Report Data Source Rule**: Morning Market Brief sections must use Supabase StockData official tables as the source of truth. Market, macro, price, supply, valuation, short-selling, event, and feature numbers must come only from the official Supabase tables, not from external market-price crawlers.
