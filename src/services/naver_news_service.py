@@ -16,7 +16,7 @@ class NaverNewsService:
         self.enabled = bool(self.client_id and self.client_secret)
         self.session = requests.Session()
 
-    def search_news(self, query: str, display: int = 3) -> list[dict]:
+    def search_news(self, query: str, display: int = 10) -> list[dict]:
         if not self.enabled or not query:
             return []
 
@@ -39,11 +39,16 @@ class NaverNewsService:
             response.raise_for_status()
             payload = response.json()
             items = []
+            seen_titles = set()
             for item in payload.get("items", []):
                 title = self._clean_text(item.get("title"))
                 description = self._clean_text(item.get("description"))
                 if not title and not description:
                     continue
+                dedupe_key = title or description
+                if dedupe_key in seen_titles:
+                    continue
+                seen_titles.add(dedupe_key)
                 items.append(
                     {
                         "title": title,

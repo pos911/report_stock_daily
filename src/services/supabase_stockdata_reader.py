@@ -6,7 +6,7 @@ from src.data.supabase_reader import ETF_PATTERN, SupabaseReader
 
 
 ETF_NAME_FALLBACK = re.compile(
-    r"(ETF|ACE|KODEX|TIGER|KBSTAR|SOL|HANARO|ARIRANG|KOSEF)",
+    r"(ETF|ETN|ACE|KODEX|TIGER|KBSTAR|SOL|HANARO|ARIRANG|KOSEF)",
     re.IGNORECASE,
 )
 
@@ -251,13 +251,13 @@ class SupabaseStockDataReader:
     @staticmethod
     def _classify_market(market_value: str | None, name: str) -> str | None:
         market_text = (market_value or "").upper()
+        if ETF_PATTERN.search(name or "") or ETF_NAME_FALLBACK.search(name or ""):
+            return "ETF"
         if "KOSPI" in market_text:
             return "KOSPI"
         if "KOSDAQ" in market_text:
             return "KOSDAQ"
         if "ETF" in market_text:
-            return "ETF"
-        if ETF_PATTERN.search(name or "") or ETF_NAME_FALLBACK.search(name or ""):
             return "ETF"
         return None
 

@@ -1,7 +1,9 @@
 import argparse
+from collections import Counter
 import datetime
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -44,6 +46,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 VALID_REPORT_TYPES = ("morning", "closing", "regular")
+ETF_LIKE_KEYWORDS = ("KODEX", "TIGER", "KBSTAR", "SOL", "ACE", "ARIRANG", "KOSEF", "ETF", "ETN", "인버스", "레버리지")
+NEWS_THEME_RULES = (
+    ("실적", ("실적", "영업이익", "매출", "분기", "컨센서스", "어닝")),
+    ("수주/계약", ("수주", "계약", "공급", "납품", "수출", "발주")),
+    ("정책/규제", ("정책", "규제", "지원", "관세", "정부", "입법")),
+    ("제품/서비스", ("출시", "신제품", "서비스", "플랫폼", "브랜드", "론칭")),
+    ("투자/지분", ("투자", "지분", "인수", "합병", "매각", "m&a")),
+    ("주주환원", ("배당", "자사주", "소각", "주주환원")),
+    ("업황/가격", ("업황", "반도체", "원유", "유가", "환율", "금리", "수요", "가격", "단가", "재고")),
+    ("리스크", ("소송", "리콜", "제재", "조사", "악재", "논란", "부진")),
+)
+NEWS_TOKEN_RE = re.compile(r"[A-Za-z0-9가-힣]+")
+NEWS_STOPWORDS = {
+    "관련", "기자", "오늘", "이번", "시장", "주가", "종목", "기업", "업계", "기준", "최신", "네이버",
+    "뉴스", "증권", "투자", "전망", "이슈", "대한", "에서", "으로", "대해", "이후", "통해", "정도",
+}
 
 
 def _parse_args():
@@ -271,6 +289,11 @@ def _safe_float(value):
         return None
 
 
+def _is_effective_zero(value, epsilon: float = 1e-9) -> bool:
+    numeric = _safe_float(value)
+    return numeric is not None and abs(numeric) <= epsilon
+
+
 def _format_supply_value(value) -> str:
     numeric = _safe_float(value)
     if numeric is None:
@@ -288,6 +311,51 @@ def _format_market_flow_value(value) -> str:
         label = "순매수" if numeric >= 0 else "순매도"
         return f"{label} {numeric:+,.0f}억원"
     return format_flow_amount(numeric)
+
+
+def _format_zero_sensitive_percent(value) -> str:
+    numeric = _safe_float(value)
+    if numeric is None or abs(numeric) <= 1e-9:
+        return NA_TEXT
+    return format_percent(numeric)
+
+
+def _format_zero_sensitive_number(value, digits: int = 2) -> str:
+    numeric = _safe_float(value)
+    if numeric is None or abs(numeric) <= 1e-9:
+        return NA_TEXT
+    return format_plain_number(numeric, digits=digits)
+
+
+def _truncate_text(text: str, max_len: int = 34) -> str:
+    stripped = (text or "").strip()
+    if len(stripped) <= max_len:
+        return stripped
+    return stripped[: max_len - 1].rstrip() + "…"
+
+
+def _extract_news_theme(news_items: list[dict], stock_name: str) -> tuple[str | None, str | None]:
+    joined_text = " ".join(
+        f"{item.get('title', '')} {item.get('description', '')}".lower()
+        for item in news_items
+    )
+    theme_scores = []
+    for label, keywords in NEWS_THEME_RULES:
+        score = sum(joined_text.count(keyword.lower()) for keyword in keywords)
+        if score > 0:
+            theme_scores.append((score, label))
+    theme = max(theme_scores)[1] if theme_scores else None
+
+    stock_name_tokens = {token.lower() for token in NEWS_TOKEN_RE.findall(stock_name or "") if len(token) >= 2}
+    token_counter = Counter()
+    for item in news_items:
+        for token in NEWS_TOKEN_RE.findall(f"{item.get('title', '')} {item.get('description', '')}"):
+            lowered = token.lower()
+            if len(lowered) < 2 or lowered in NEWS_STOPWORDS or lowered in stock_name_tokens:
+                continue
+            token_counter[lowered] += 1
+    keyword = token_counter.most_common(1)[0][0] if token_counter else None
+    return theme, keyword
 
 
 def _relative_position(price_value, ma_value):
@@ -414,7 +482,7 @@ def _build_market_impact_lists(macro: dict, derivatives: dict) -> tuple[list[str
         positives.append(f"VIX가 {format_plain_number(vix)}로 낮아 패닉성 위험회피는 제한적입니다.")
     elif vix is not None and vix >= 22:
         burdens.append(f"VIX가 {format_plain_number(vix)}로 높아 장중 변동성 확대 가능성이 있습니다.")
-    if night_ret is not None:
+    if night_ret is not None and abs(night_ret) > 1e-9:
         tone = "우호적" if night_ret > 0 else "부담" if night_ret < 0 else "중립"
         watchpoints.append(f"야간선물 수익률은 {format_percent(night_ret)}로 개장 체감에는 {tone} 신호입니다.")
 
@@ -435,34 +503,38 @@ def _build_market_impact_lists(macro: dict, derivatives: dict) -> tuple[list[str
     return positives[:3], burdens[:3], watchpoints[:3]
 
 
-def _format_news_reason_from_titles(news_items: list[dict]) -> str:
+def _format_news_reason_from_titles(news_items: list[dict], stock_name: str) -> str:
     if not news_items:
         return ""
-    first = news_items[0]
-    title = first.get("title") or ""
-    desc = first.get("description") or ""
-    if title and desc:
-        return f"{title} 이슈가 부각되며 관련 관심이 유입됐습니다."
-    if title:
-        return f"{title} 관련 뉴스가 부각됐습니다."
-    return ""
+    theme, keyword = _extract_news_theme(news_items, stock_name)
+    representative_title = _truncate_text(news_items[0].get("title") or "")
+    if theme and representative_title:
+        return f"네이버 최근 뉴스 최대 10건 기준 `{theme}` 테마가 반복됐고, `{representative_title}` 흐름이 단기 관심을 자극했습니다."
+    if theme:
+        return f"네이버 최근 뉴스 최대 10건에서 `{theme}` 관련 이슈 노출이 겹치며 단기 거래 수요가 유입됐습니다."
+    if keyword and representative_title:
+        return f"네이버 최근 뉴스 최대 10건에서 `{keyword}` 키워드가 반복됐고, `{representative_title}` 이슈가 관심을 모았습니다."
+    if representative_title:
+        return f"네이버 최근 뉴스 최대 10건에서 `{representative_title}` 이슈가 가장 먼저 포착돼 단기 관심이 유입됐습니다."
+    return "네이버 최근 뉴스 노출이 이어지며 단기 거래 관심이 확대됐습니다."
 
 
 def _build_top_volume_reason(stock: dict, naver_service: NaverNewsService, analyzer: GeminiAnalyzer | None) -> str:
     stock_name = stock.get("name") or stock.get("symbol") or ""
     upper_name = stock_name.upper()
-    if any(keyword in upper_name for keyword in ("KODEX", "TIGER", "KBSTAR", "SOL", "ACE", "ARIRANG", "KOSEF", "ETF", "ETN", "인버스", "레버리지")):
+    if any(keyword in upper_name for keyword in ETF_LIKE_KEYWORDS):
         return "ETF/ETN 거래대금 상위는 방향성 단정보다 단기 트레이딩 수요와 변동성 확대 신호로 해석하는 편이 적절합니다."
-    news_items = naver_service.search_news(stock_name, display=3)
+    news_items = naver_service.search_news(stock_name, display=10)
     if news_items:
-        if analyzer:
+        theme, keyword = _extract_news_theme(news_items, stock_name)
+        title_reason = _format_news_reason_from_titles(news_items, stock_name)
+        if analyzer and not theme and not keyword:
             try:
                 summarized = analyzer.summarize_news_reason(stock_name, news_items)
                 if summarized:
                     return summarized
             except Exception as exc:
                 logger.warning(f"Gemini reason fallback for {stock_name}: {exc}")
-        title_reason = _format_news_reason_from_titles(news_items)
         if title_reason:
             return title_reason
 
@@ -575,15 +647,111 @@ def _format_static_snapshot(snapshot: dict) -> str:
                 f"변동성 {format_ratio_metric((_safe_float(features.get('volatility_20d')) * 100) if _safe_float(features.get('volatility_20d')) is not None else None)}, "
                 f"외국인 수급 z-score {format_signed_multiple(features.get('foreign_flow_zscore'), '')}"
             ),
-            f"- 공매도 비중: {format_ratio_metric(short_row.get('short_ratio'))}",
+            f"- 공매도: {_format_short_selling_summary_v2(short_row)}",
             f"- 공시 이벤트: {event_text}",
-            f"- 코멘트: {_build_quant_comment(snapshot)}",
+            f"- 퀀트 해석: {_build_quant_comment_v2(snapshot)}",
         ]
     )
 
 
 def format_signed_multiple(value, suffix: str = "") -> str:
     return NA_TEXT if is_missing(value) else f"{float(value):+.2f}{suffix}"
+
+
+def _format_short_selling_summary_v2(short_row: dict) -> str:
+    ratio = _safe_float(short_row.get("short_ratio"))
+    short_value = _safe_float(short_row.get("short_value"))
+    short_volume = _safe_float(short_row.get("short_volume"))
+
+    has_short_value = short_value is not None and short_value > 0
+    has_short_volume = short_volume is not None and short_volume > 0
+    ratio_text = format_ratio_metric(ratio)
+    if ratio is not None and abs(ratio) <= 1e-9 and (has_short_value or has_short_volume):
+        ratio_text = NA_TEXT
+
+    parts = [f"비중 {ratio_text}"]
+    if has_short_value:
+        parts.append(f"거래금액 {format_trading_value(short_value)}")
+    if has_short_volume:
+        parts.append(f"거래량 {format_volume(short_volume)}")
+    return " / ".join(parts)
+
+
+def _build_quant_comment_v2(snapshot: dict) -> str:
+    price = snapshot.get("price") or {}
+    supply = snapshot.get("supply") or {}
+    fundamentals = snapshot.get("fundamentals") or {}
+    features = snapshot.get("features") or {}
+    short_row = snapshot.get("short_selling") or {}
+
+    comments = []
+    return_5d = _safe_float(features.get("return_5d"))
+    volatility = _safe_float(features.get("volatility_20d"))
+    foreign_z = _safe_float(features.get("foreign_flow_zscore"))
+    foreign_holding = _safe_float(supply.get("foreign_holding_ratio"))
+    per = _safe_float(fundamentals.get("per"))
+    pbr = _safe_float(fundamentals.get("pbr"))
+    close_price = _safe_float(price.get("close_price"))
+    ma5 = _safe_float(features.get("moving_avg_5"))
+    ma20 = _safe_float(features.get("moving_avg_20"))
+    short_ratio = _safe_float(short_row.get("short_ratio"))
+    short_value = _safe_float(short_row.get("short_value"))
+    short_volume = _safe_float(short_row.get("short_volume"))
+
+    rel_ma5 = _relative_position(close_price, ma5)
+    rel_ma20 = _relative_position(close_price, ma20)
+
+    if return_5d is not None and rel_ma5 is not None and rel_ma20 is not None:
+        if return_5d > 0 and rel_ma5 > 0 and rel_ma20 > 0:
+            comments.append("5일 흐름과 이동평균 위치를 함께 보면 단기 추세는 우호적인 편입니다.")
+        elif return_5d < 0 and rel_ma5 < 0 and rel_ma20 < 0:
+            comments.append("5일 흐름과 이동평균 위치가 함께 약해 단기 추세 복원 확인이 먼저 필요합니다.")
+        else:
+            comments.append("수익률과 이동평균 신호가 엇갈려 추세 해석은 혼재 구간으로 보는 편이 적절합니다.")
+    elif return_5d is not None:
+        if return_5d >= 0.05:
+            comments.append(f"5일 수익률 {return_5d * 100:.1f}%로 단기 모멘텀은 강한 편입니다.")
+        elif return_5d <= -0.05:
+            comments.append(f"5일 수익률 {return_5d * 100:.1f}%로 단기 모멘텀 둔화에 유의해야 합니다.")
+
+    if rel_ma5 is not None and rel_ma20 is not None:
+        if rel_ma5 > 0 and rel_ma20 > 0:
+            comments.append("종가는 MA5와 MA20을 모두 상회해 가격 흐름 자체는 견조합니다.")
+        elif rel_ma5 < 0 and rel_ma20 < 0:
+            comments.append("종가는 MA5와 MA20을 모두 하회해 반등 확인 전까지는 방어적 접근이 낫습니다.")
+
+    if volatility is not None:
+        if volatility >= 0.04:
+            comments.append(f"20일 변동성 {volatility * 100:.1f}%로 높은 편이라 추격보다 분할 접근이 더 적절합니다.")
+        elif volatility <= 0.02:
+            comments.append(f"20일 변동성 {volatility * 100:.1f}%로 낮아 추세 추종 부담은 상대적으로 제한적입니다.")
+
+    if foreign_z is not None:
+        if foreign_z >= 1:
+            comments.append(f"외국인 수급 z-score {foreign_z:.2f}는 수급 확인 신호로는 우호적입니다.")
+        elif foreign_z <= -1:
+            comments.append(f"외국인 수급 z-score {foreign_z:.2f}로 수급 확인은 약해 가격 추세와 분리해서 볼 필요가 있습니다.")
+
+    if foreign_holding is not None:
+        comments.append(f"외국인 보유율은 {foreign_holding:.1f}% 수준입니다.")
+
+    if per is not None or pbr is not None:
+        ratio_parts = []
+        if per is not None:
+            ratio_parts.append(f"PER {per:.1f}배")
+        if pbr is not None:
+            ratio_parts.append(f"PBR {pbr:.1f}배")
+        comments.append(" / ".join(ratio_parts) + "는 절대 저평가·고평가 단정보다 업종 맥락 안에서 참고하는 편이 적절합니다.")
+
+    if short_ratio is not None and abs(short_ratio) > 1e-9:
+        comments.append(f"공매도 비중 {short_ratio:.1f}%는 단기 수급 압력 점검 포인트입니다.")
+    elif (short_value is not None and short_value > 0) or (short_volume is not None and short_volume > 0):
+        comments.append("공매도 금액·수량은 있으나 비중값은 0으로 적재돼 방향성 해석에는 제한이 있습니다.")
+
+    if not comments:
+        return "핵심 지표가 제한적이라 추세·수급·변동성 신호가 더 쌓일 때까지 관찰 강도를 높이는 편이 적절합니다."
+
+    return " ".join(comments[:4])
 
 
 def _build_morning_report(
@@ -602,6 +770,9 @@ def _build_morning_report(
     derivatives_base_date = format_date(derivatives.get("base_date"))
     latest_price_base_date = format_date(bundle.get("latest_price_base_date"))
     now_text = now_kst.strftime("%Y-%m-%d %H:%M KST")
+    derivative_basis_text = _format_zero_sensitive_number(derivatives.get("futures_basis"))
+    derivative_night_text = _format_zero_sensitive_percent(derivatives.get("night_futures_return"))
+    derivative_open_interest = format_plain_number(derivatives.get("open_interest"), digits=0)
 
     us_market_summary = _generate_us_market_summary(macro, news_text, analyzer)
     positives, burdens, watchpoints = _build_market_impact_lists(macro, derivatives)
@@ -638,7 +809,9 @@ def _build_morning_report(
             f"- 원/달러: {format_usdkrw(macro.get('usdkrw'))}",
             f"- 한국 10년물: {format_rate_percent(macro.get('kr10y'))}",
             f"- 미국 10년물: {format_rate_percent(macro.get('us10y'))}",
+            f"- 전일 KOSPI/KOSDAQ: {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))}) / {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))})",
             f"- KOSPI 외국인: {_format_market_flow_value(macro.get('kospi_foreign_net_buy'))} / 기관: {_format_market_flow_value(macro.get('kospi_institutional_net_buy'))}",
+            f"- 파생 보조: KOSPI200 선물 {format_index(derivatives.get('kospi200_futures'))} / 베이시스 {derivative_basis_text} / 미결제약정 {derivative_open_interest} / 야간선물 수익률 {derivative_night_text}",
             "",
             "## 3. 전일 한국 시장 요약",
             f"_기준일: {macro_base_date} (`normalized_global_macro_daily`), 시장 체력: {breadth_base_date} (`market_breadth_daily`)_",
