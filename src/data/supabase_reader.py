@@ -922,3 +922,448 @@ class SupabaseReader:
 
         rendered = "\n".join(f"- {item}" for item in items)
         return rendered[:MAX_NEWS_CONTEXT_CHARS]
+
+    # -------------------------------------------------------------------------
+    # Report spec v3 helpers
+    # -------------------------------------------------------------------------
+
+    def fetch_latest_global_macro_snapshot(self):
+        columns = (
+            "base_date, usdkrw, dxy, us10y, kr10y, kospi, kospi_change_rate, "
+            "kosdaq, kosdaq_change_rate, nasdaq, nasdaq_change_rate, sp500, "
+            "sp500_change_rate, sox, vix, wti, brent, gold, copper, bdry, "
+            "hy_spread, kospi_individual_net_buy, kospi_foreign_net_buy, "
+            "kospi_institutional_net_buy, kosdaq_individual_net_buy, "
+            "kosdaq_foreign_net_buy, kosdaq_institutional_net_buy, available_at"
+        )
+        try:
+            response = (
+                self.client.table("normalized_global_macro_daily")
+                .select(columns)
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return (response.data or [{}])[0]
+        except Exception as exc:
+            print(f"[WARNING] fetch_latest_global_macro_snapshot failed: {exc}")
+            return {}
+
+    def fetch_latest_market_breadth(self):
+        columns = "base_date, advances, declines, unchanged, advancing_volume, declining_volume, available_at"
+        try:
+            response = (
+                self.client.table("market_breadth_daily")
+                .select(columns)
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return (response.data or [{}])[0]
+        except Exception as exc:
+            print(f"[WARNING] fetch_latest_market_breadth failed: {exc}")
+            return {}
+
+    def fetch_latest_derivatives_snapshot(self):
+        columns = (
+            "base_date, kospi200_futures, futures_basis, open_interest, "
+            "night_futures_return, expiration_flag, available_at"
+        )
+        try:
+            response = (
+                self.client.table("normalized_derivatives_daily")
+                .select(columns)
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return (response.data or [{}])[0]
+        except Exception as exc:
+            print(f"[WARNING] fetch_latest_derivatives_snapshot failed: {exc}")
+            return {}
+
+    def fetch_static_stock_universe(self):
+        columns = "symbol, name, market, enabled, source_file, updated_at"
+        try:
+            response = (
+                self.client.table("static_stock_universe")
+                .select(columns)
+                .eq("enabled", True)
+                .order("market")
+                .order("symbol")
+                .execute()
+            )
+            return response.data or []
+        except Exception as exc:
+            print(f"[WARNING] fetch_static_stock_universe failed: {exc}")
+            return []
+
+    def _fetch_rows_for_symbols(self, table_name: str, columns: str, symbols: list[str], limit: int = 10000):
+        if not symbols:
+            return []
+        try:
+            response = (
+                self.client.table(table_name)
+                .select(columns)
+                .in_("symbol", symbols)
+                .order("base_date", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return response.data or []
+        except Exception as exc:
+            print(f"[WARNING] _fetch_rows_for_symbols({table_name}) failed: {exc}")
+            return []
+
+    @staticmethod
+    def _pick_latest_rows_by_symbol(rows: list[dict]) -> dict:
+        latest_rows = {}
+        for row in rows or []:
+            symbol = row.get("symbol")
+            if symbol and symbol not in latest_rows:
+                latest_rows[symbol] = row
+        return latest_rows
+
+    @staticmethod
+    def _pick_rows_matching_price_date(symbols: list[str], price_map: dict, rows: list[dict]) -> dict:
+        grouped = {}
+        for row in rows or []:
+            symbol = row.get("symbol")
+            if not symbol:
+                continue
+            grouped.setdefault(symbol, []).append(row)
+
+        selected = {}
+        for symbol in symbols:
+            symbol_rows = grouped.get(symbol, [])
+            if not symbol_rows:
+                selected[symbol] = {}
+                continue
+            price_date = (price_map.get(symbol) or {}).get("base_date")
+            exact = next((row for row in symbol_rows if row.get("base_date") == price_date), None)
+            selected[symbol] = exact or symbol_rows[0]
+        return selected
+
+    def fetch_stock_feature_pivot(self, symbols, feature_names):
+        if not symbols or not feature_names:
+            return {}
+        try:
+            response = (
+                self.client.table("feature_store_daily")
+                .select("symbol, base_date, feature_name, feature_value, available_at")
+                .in_("symbol", symbols)
+                .in_("feature_name", feature_names)
+                .order("base_date", desc=True)
+                .limit(20000)
+                .execute()
+            )
+            rows = response.data or []
+        except Exception as exc:
+            print(f"[WARNING] fetch_stock_feature_pivot failed: {exc}")
+            return {}
+
+        pivoted = {}
+        seen = set()
+        for row in rows:
+            symbol = row.get("symbol")
+            feature_name = row.get("feature_name")
+            if not symbol or not feature_name:
+                continue
+            key = (symbol, feature_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            pivoted.setdefault(symbol, {})
+            pivoted[symbol][feature_name] = row.get("feature_value")
+            pivoted[symbol]["base_date"] = row.get("base_date")
+            pivoted[symbol]["available_at"] = row.get("available_at")
+        return pivoted
+
+    def fetch_latest_stock_events(self, symbols):
+        columns = "symbol, base_date, event_type, event_score, sentiment_score, available_at"
+        return self._pick_latest_rows_by_symbol(
+            self._fetch_rows_for_symbols("normalized_stock_events_daily", columns, symbols)
+        )
+
+    def fetch_latest_short_selling(self, symbols):
+        columns = "symbol, base_date, short_volume, short_value, short_ratio, source, available_at"
+        return self._pick_latest_rows_by_symbol(
+            self._fetch_rows_for_symbols("normalized_stock_short_selling", columns, symbols)
+        )
+
+    def fetch_static_universe_stock_snapshot(self):
+        static_universe = self.fetch_static_stock_universe()
+        symbols = [item["symbol"] for item in static_universe if item.get("symbol")]
+        if not symbols:
+            return []
+
+        latest_price_base_date = self._get_latest_base_date("normalized_stock_prices_daily")
+        price_columns = (
+            "symbol, base_date, open_price, high_price, low_price, close_price, "
+            "volume, trading_value, market_cap, outstanding_shares, available_at"
+        )
+        supply_columns = (
+            "symbol, base_date, individual_net_buy, foreign_net_buy, institutional_net_buy, "
+            "pension_net_buy, corporate_net_buy, foreign_holding_ratio, available_at"
+        )
+        fundamental_columns = "symbol, base_date, per, pbr, roe, debt_ratio, source, available_at"
+        short_columns = "symbol, base_date, short_volume, short_value, short_ratio, source, available_at"
+        event_columns = "symbol, base_date, event_type, event_score, sentiment_score, available_at"
+
+        try:
+            price_rows = (
+                self.client.table("normalized_stock_prices_daily")
+                .select(price_columns)
+                .eq("base_date", latest_price_base_date)
+                .in_("symbol", symbols)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            print(f"[WARNING] fetch_static_universe_stock_snapshot prices failed: {exc}")
+            price_rows = []
+
+        price_map = {row["symbol"]: row for row in price_rows if row.get("symbol")}
+        supply_map = self._pick_rows_matching_price_date(
+            symbols,
+            price_map,
+            self._fetch_rows_for_symbols("normalized_stock_supply_daily", supply_columns, symbols),
+        )
+        fundamental_map = self._pick_latest_rows_by_symbol(
+            self._fetch_rows_for_symbols("normalized_stock_fundamentals_ratios", fundamental_columns, symbols)
+        )
+        short_map = self.fetch_latest_short_selling(symbols)
+        event_map = self.fetch_latest_stock_events(symbols)
+        feature_map = self.fetch_stock_feature_pivot(
+            symbols,
+            ["return_5d", "moving_avg_5", "moving_avg_20", "volatility_20d", "foreign_flow_zscore"],
+        )
+
+        snapshots = []
+        for item in static_universe:
+            symbol = item.get("symbol")
+            snapshots.append(
+                {
+                    "symbol": symbol,
+                    "name": item.get("name") or symbol,
+                    "market": item.get("market"),
+                    "source_file": item.get("source_file"),
+                    "updated_at": item.get("updated_at"),
+                    "price": price_map.get(symbol, {}),
+                    "supply": supply_map.get(symbol, {}),
+                    "fundamentals": fundamental_map.get(symbol, {}),
+                    "short_selling": short_map.get(symbol, {}),
+                    "event": event_map.get(symbol, {}),
+                    "features": feature_map.get(symbol, {}),
+                }
+            )
+        return snapshots
+
+    def fetch_full_market_top_volume_stocks(self, limit=5):
+        latest_price_base_date = self._get_latest_base_date("normalized_stock_prices_daily")
+        result = {
+            "base_date": latest_price_base_date,
+            "coverage": {
+                "covered_symbols": 0,
+                "kospi_covered": 0,
+                "kosdaq_covered": 0,
+                "null_close_rows": 0,
+            },
+            "rows": [],
+        }
+        if not latest_price_base_date:
+            return result
+
+        try:
+            master_rows = (
+                self.client.table("stocks_master")
+                .select("symbol, name, market, is_active, updated_at")
+                .in_("market", ["KOSPI", "KOSDAQ"])
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            print(f"[WARNING] fetch_full_market_top_volume_stocks master failed: {exc}")
+            return result
+
+        try:
+            price_rows = (
+                self.client.table("normalized_stock_prices_daily")
+                .select(
+                    "symbol, base_date, open_price, high_price, low_price, close_price, "
+                    "volume, trading_value, market_cap, outstanding_shares, available_at"
+                )
+                .eq("base_date", latest_price_base_date)
+                .order("volume", desc=True)
+                .limit(7000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            print(f"[WARNING] fetch_full_market_top_volume_stocks prices failed: {exc}")
+            return result
+
+        master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+        joined_rows = []
+        covered = set()
+        kospi_covered = set()
+        kosdaq_covered = set()
+        null_close_rows = 0
+
+        for row in price_rows:
+            master = master_map.get(row.get("symbol"))
+            if not master:
+                continue
+            market = master.get("market")
+            symbol = row.get("symbol")
+            covered.add(symbol)
+            if market == "KOSPI":
+                kospi_covered.add(symbol)
+            elif market == "KOSDAQ":
+                kosdaq_covered.add(symbol)
+            if row.get("close_price") is None:
+                null_close_rows += 1
+            joined_rows.append(
+                {
+                    **row,
+                    "name": master.get("name") or symbol,
+                    "market": market,
+                }
+            )
+
+        result["coverage"] = {
+            "covered_symbols": len(covered),
+            "kospi_covered": len(kospi_covered),
+            "kosdaq_covered": len(kosdaq_covered),
+            "null_close_rows": null_close_rows,
+        }
+        result["rows"] = joined_rows[: max(limit, 5) * 20]
+        return result
+
+    def fetch_top_volume_stocks_by_market(self, limit=5):
+        full_market = self.fetch_full_market_top_volume_stocks(limit=limit)
+        latest_price_base_date = full_market.get("base_date")
+        market_rows = full_market.get("rows") or []
+        coverage = full_market.get("coverage") or {}
+
+        result = {
+            "base_date": latest_price_base_date,
+            "coverage": coverage,
+            "KOSPI": [],
+            "KOSDAQ": [],
+            "ETF": [],
+        }
+
+        for market_name in ("KOSPI", "KOSDAQ"):
+            filtered = [row for row in market_rows if row.get("market") == market_name]
+            result[market_name] = filtered[:limit]
+
+        try:
+            master_rows = (
+                self.client.table("stocks_master")
+                .select("symbol, name, market")
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            print(f"[WARNING] fetch_top_volume_stocks_by_market ETF master failed: {exc}")
+            master_rows = []
+
+        master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
+        etf_pattern = re.compile(r"(KODEX|TIGER|ACE|KBSTAR|SOL|HANARO|ARIRANG|KOSEF|TIMEFOLIO|RISE)", re.IGNORECASE)
+        try:
+            price_rows = (
+                self.client.table("normalized_stock_prices_daily")
+                .select(
+                    "symbol, base_date, open_price, high_price, low_price, close_price, "
+                    "volume, trading_value, market_cap, outstanding_shares, available_at"
+                )
+                .eq("base_date", latest_price_base_date)
+                .order("volume", desc=True)
+                .limit(7000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            print(f"[WARNING] fetch_top_volume_stocks_by_market ETF prices failed: {exc}")
+            price_rows = []
+
+        etf_rows = []
+        for row in price_rows:
+            symbol = row.get("symbol")
+            master = master_map.get(symbol, {})
+            name = master.get("name") or symbol or ""
+            market = master.get("market")
+            if market == "ETF" or etf_pattern.search(name):
+                etf_rows.append({**row, "name": name, "market": market or "ETF"})
+        result["ETF"] = etf_rows[:limit]
+        return result
+
+    def fetch_report_readiness(self):
+        latest_price_date = self._get_latest_base_date("normalized_stock_prices_daily")
+        latest_macro_date = self._get_latest_base_date("normalized_global_macro_daily")
+        static_universe = self.fetch_static_stock_universe()
+        static_enabled_count = len(static_universe)
+        full_market = self.fetch_full_market_top_volume_stocks(limit=5)
+        coverage = full_market.get("coverage") or {}
+
+        recent_logs = []
+        try:
+            logs = (
+                self.client.table("pipeline_run_logs")
+                .select("job_name, target_date, status, records_processed, error_message")
+                .in_(
+                    "job_name",
+                    [
+                        "daily_stock_pipeline",
+                        "daily_stock_full_price_pipeline",
+                        "daily_ecos_macro_pipeline",
+                        "daily_macro_pipeline",
+                        "daily_derivatives_pipeline",
+                        "daily_feature_generator",
+                    ],
+                )
+                .order("target_date", desc=True)
+                .limit(20)
+                .execute()
+                .data
+                or []
+            )
+            recent_logs = logs
+        except Exception as exc:
+            print(f"[WARNING] fetch_report_readiness pipeline logs failed: {exc}")
+
+        latest_full_price_processed = 0
+        for log in recent_logs:
+            if log.get("job_name") == "daily_stock_full_price_pipeline":
+                latest_full_price_processed = log.get("records_processed") or 0
+                break
+
+        recent_problem_logs = [
+            log for log in recent_logs
+            if str(log.get("status", "")).upper() in {"WARN", "WARNING", "ERROR", "FAIL", "FAILED"}
+        ]
+
+        report_guard_pass = (
+            bool(latest_macro_date)
+            and bool(latest_price_date)
+            and (coverage.get("covered_symbols") or 0) > 2000
+            and static_enabled_count > 0
+            and latest_full_price_processed > 2000
+        )
+
+        return {
+            "latest_price_date": latest_price_date,
+            "latest_macro_date": latest_macro_date,
+            "report_guard_pass": report_guard_pass,
+            "price_coverage": coverage,
+            "static_enabled_count": static_enabled_count,
+            "recent_pipeline_logs": recent_logs,
+            "recent_problem_logs": recent_problem_logs,
+            "latest_full_price_records_processed": latest_full_price_processed,
+        }

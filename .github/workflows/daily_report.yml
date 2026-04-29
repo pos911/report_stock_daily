@@ -40,14 +40,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Apply schema migrations if present
-        run: |
-          if [ -f scripts/apply_schema_migrations.py ]; then
-            python scripts/apply_schema_migrations.py
-          else
-            echo "scripts/apply_schema_migrations.py not found; skipping schema migration."
-          fi
-
       - name: Inject API Keys & Run Morning Report
         env:
           API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
@@ -113,14 +105,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Apply schema migrations if present
-        run: |
-          if [ -f scripts/apply_schema_migrations.py ]; then
-            python scripts/apply_schema_migrations.py
-          else
-            echo "scripts/apply_schema_migrations.py not found; skipping schema migration."
-          fi
 
       - name: Inject API Keys & Run Closing Report
         env:
@@ -189,14 +173,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Apply schema migrations if present
-        run: |
-          if [ -f scripts/apply_schema_migrations.py ]; then
-            python scripts/apply_schema_migrations.py
-          else
-            echo "scripts/apply_schema_migrations.py not found; skipping schema migration."
-          fi
 
       - name: Inject API Keys & Run Regular Report
         env:
