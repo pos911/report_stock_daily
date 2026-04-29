@@ -6,6 +6,7 @@ import logging
 import re
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 current_dir = Path(__file__).resolve().parent
@@ -62,6 +63,7 @@ NEWS_STOPWORDS = {
     "관련", "기자", "오늘", "이번", "시장", "주가", "종목", "기업", "업계", "기준", "최신", "네이버",
     "뉴스", "증권", "투자", "전망", "이슈", "대한", "에서", "으로", "대해", "이후", "통해", "정도",
 }
+KST_ZONE = ZoneInfo("Asia/Seoul")
 
 
 def _parse_args():
@@ -82,6 +84,37 @@ def _parse_args():
 
     args.report_type = rt
     return args
+
+
+def _get_now_kst() -> datetime.datetime:
+    return datetime.datetime.now(KST_ZONE)
+
+
+def _get_regular_slot_label(now_kst: datetime.datetime) -> str:
+    hour = now_kst.hour
+    if hour == 10:
+        return "오전 10:30 점검"
+    if hour == 12:
+        return "오후 12:30 점검"
+    if hour == 14:
+        return "오후 14:30 점검"
+    return "장중 정기 점검"
+
+
+def _fetch_latest_base_date(reader: SupabaseReader, table_name: str) -> str:
+    try:
+        response = (
+            reader.client.table(table_name)
+            .select("base_date")
+            .order("base_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if response.data:
+            return format_date(response.data[0].get("base_date"))
+    except Exception as exc:
+        logger.warning(f"Failed to fetch latest base_date from {table_name}: {exc}")
+    return NA_TEXT
 
 
 def _validate_top_volume(top_volume_data: dict) -> bool:
@@ -779,7 +812,10 @@ def _build_morning_report(
     naver_service = NaverNewsService()
 
     lines = [
-        f"# Morning Market Brief | 기준일: {macro_base_date} / 작성시각: {now_text}",
+        "# Morning Market Brief",
+        f"- 작성시각: {now_text}",
+        f"- 가격 기준일: {latest_price_base_date}",
+        f"- 매크로 기준일: {macro_base_date}",
         "",
         "## 1. 미국 시장 정리",
         f"_기준일: {macro_base_date} (`normalized_global_macro_daily`)_",
@@ -947,17 +983,30 @@ def _run_existing_report_flow(report_type: str, now_kst: datetime.datetime) -> N
     logger.info("5. 데이터 품질 가드레일 점검 중...")
     data_guardrails = reader.fetch_data_quality_guardrails()
 
-    generation_time_str = now_kst.strftime("%Y-%m-%d %H:%M (KST)")
+    generation_time_str = now_kst.strftime("%Y-%m-%d %H:%M KST")
+    macro_base_date = format_date((macro_data or {}).get("base_date"))
+    price_base_date = _fetch_latest_base_date(reader, "normalized_stock_prices_daily")
+    regular_slot_label = _get_regular_slot_label(now_kst) if report_type == "regular" else ""
     type_label_map = {
         "morning": "오전 브리핑",
         "closing": "마감 분석",
         "regular": "정규 리포트",
     }
     report_label = type_label_map.get(report_type, "데일리 리포트")
+    if report_type == "regular":
+        report_label = regular_slot_label
+    if report_type == "regular":
+        report_title = f"Intraday Market Brief | {regular_slot_label}"
+    elif report_type == "closing":
+        report_title = "Closing Market Brief"
+    else:
+        report_title = f"데일리 퀀트 리포트 - {report_label}"
 
     report_content = (
-        f"# 데일리 퀀트 리포트 - {report_label}\n"
-        f"> **Generated at**: {generation_time_str}\n\n"
+        f"# {report_title}\n"
+        f"- 작성시각: {generation_time_str}\n"
+        f"- 가격 기준일: {price_base_date}\n"
+        f"- 매크로 기준일: {macro_base_date}\n\n"
     )
 
     logger.info("STEP 1: 시장/뉴스 요약 생성 중...")
@@ -1032,8 +1081,7 @@ def _run_existing_report_flow(report_type: str, now_kst: datetime.datetime) -> N
 def main():
     args = _parse_args()
     report_type = args.report_type
-    kst_tz = datetime.timezone(datetime.timedelta(hours=9))
-    now_kst = datetime.datetime.now(kst_tz)
+    now_kst = _get_now_kst()
     logger.info(f"=== Daily Report Pipeline 시작 [type={report_type}] ===")
 
     if report_type == "morning":
