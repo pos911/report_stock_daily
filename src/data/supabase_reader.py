@@ -1349,18 +1349,30 @@ class SupabaseReader:
             if str(log.get("status", "")).upper() in {"WARN", "WARNING", "ERROR", "FAIL", "FAILED"}
         ]
 
-        report_guard_pass = (
+        covered_symbols = coverage.get("covered_symbols") or 0
+        minimum_report_ready = (
             bool(latest_macro_date)
             and bool(latest_price_date)
-            and (coverage.get("covered_symbols") or 0) > 2000
             and static_enabled_count > 0
+            and covered_symbols > 0
+        )
+        full_market_coverage_pass = (
+            covered_symbols > 2000
             and latest_full_price_processed > 2000
         )
+        if full_market_coverage_pass:
+            coverage_status = "FULL"
+        elif covered_symbols > 0:
+            coverage_status = "PARTIAL"
+        else:
+            coverage_status = "LIMITED"
 
         return {
             "latest_price_date": latest_price_date,
             "latest_macro_date": latest_macro_date,
-            "report_guard_pass": report_guard_pass,
+            "minimum_report_ready": minimum_report_ready,
+            "full_market_coverage_pass": full_market_coverage_pass,
+            "coverage_status": coverage_status,
             "price_coverage": coverage,
             "static_enabled_count": static_enabled_count,
             "recent_pipeline_logs": recent_logs,

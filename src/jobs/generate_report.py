@@ -325,7 +325,17 @@ def _format_short_selling_summary(short_row: dict) -> str:
 
 
 def _build_readiness_text(readiness: dict) -> str:
-    return "데이터 점검: 정상" if readiness.get("report_guard_pass") else "데이터 점검: 커버리지 부족 또는 파이프라인 경고 확인 필요"
+    if readiness.get("minimum_report_ready"):
+        return "데이터 점검: 정상"
+    return "데이터 점검: 리포트 최소 생성 조건 확인 필요"
+
+
+def _build_coverage_text(readiness: dict) -> str:
+    if readiness.get("full_market_coverage_pass"):
+        return "전체시장 커버리지: FULL"
+    if readiness.get("coverage_status") == "PARTIAL":
+        return "전체시장 커버리지: PARTIAL"
+    return "전체시장 커버리지: LIMITED"
 
 
 def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict) -> list[str]:
@@ -333,7 +343,9 @@ def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict)
     latest_macro_date = format_date(readiness.get("latest_macro_date"))
     coverage = (readiness.get("price_coverage") or {}).get("covered_symbols", 0)
     static_count = readiness.get("static_enabled_count", 0)
-    report_guard_pass = bool(readiness.get("report_guard_pass"))
+    minimum_report_ready = bool(readiness.get("minimum_report_ready"))
+    full_market_coverage_pass = bool(readiness.get("full_market_coverage_pass"))
+    coverage_status = readiness.get("coverage_status") or "LIMITED"
     recent_problem_count = len(readiness.get("recent_problem_logs") or [])
     latest_full_price_processed = readiness.get("latest_full_price_records_processed", 0)
     lines = [
@@ -342,15 +354,20 @@ def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict)
         "- 수치 기준: Supabase StockData 최신 적재값",
         f"- 가격 기준일: {latest_price_date}",
         f"- 매크로 기준일: {latest_macro_date}",
-        f"- report_guard_pass: {'true' if report_guard_pass else 'false'}",
+        f"- minimum_report_ready: {'true' if minimum_report_ready else 'false'}",
+        f"- full_market_coverage_pass: {'true' if full_market_coverage_pass else 'false'}",
+        f"- coverage_status: {coverage_status}",
         f"- {_build_readiness_text(readiness)}",
+        f"- {_build_coverage_text(readiness)}",
         f"- 전체시장 가격 커버리지: {coverage:,}종목",
         f"- Static 관심종목: {static_count:,}개",
         f"- daily_stock_full_price_pipeline 최신 처리건수: {latest_full_price_processed:,}",
         f"- 최근 3일 파이프라인 경고/실패: {recent_problem_count}건",
     ]
-    if not report_guard_pass:
-        lines.append("- 데이터 커버리지 경고: 전체시장 거래량 상위 섹션의 신뢰도를 반드시 함께 확인하세요.")
+    if not minimum_report_ready:
+        lines.append("- 데이터 경고: 리포트 최소 생성 조건이 부족할 수 있어 섹션별 N/A를 함께 확인하세요.")
+    elif not full_market_coverage_pass:
+        lines.append("- 데이터 커버리지 경고: 전체시장 거래량 상위 섹션은 PARTIAL 신뢰도로 해석하세요.")
     return lines
 
 
@@ -466,21 +483,20 @@ def _infer_market_judgment(macro: dict, breadth: dict) -> str:
 
 def _format_top_volume_sections(top_volume: dict, readiness: dict, naver_service: NaverNewsService, analyzer: GeminiAnalyzer | None) -> list[str]:
     coverage = (top_volume.get("coverage") or {}).get("covered_symbols", 0)
+    full_market_coverage_pass = bool(readiness.get("full_market_coverage_pass"))
+    coverage_status = readiness.get("coverage_status") or "LIMITED"
     lines = [
         "## 거래량 상위 종목",
         f"_기준일: {format_date(top_volume.get('base_date'))} (`normalized_stock_prices_daily`, Supabase 최신 적재 기준)_",
+        f"- 시장 커버리지 상태: {coverage_status}",
         f"- 전체시장 가격 커버리지: {coverage:,}종목",
     ]
-    if coverage <= 2000:
-        lines.append("- 커버리지 부족으로 신뢰도 낮음: 전체시장 거래량 상위 해석은 참고용으로만 보세요.")
+    if not full_market_coverage_pass:
+        lines.append("- 커버리지 부족: 전체시장 거래량 상위 해석은 PARTIAL 신뢰도 기준의 참고용입니다.")
 
     for market_key in ("KOSPI", "KOSDAQ", "ETF"):
         lines.append(f"[{market_key} Top 5]")
         rows = top_volume.get(market_key) or []
-        if market_key in ("KOSPI", "KOSDAQ") and coverage <= 2000:
-            lines.append("- 커버리지 부족으로 스킵")
-            lines.append("")
-            continue
         if not rows:
             lines.append("- 데이터 없음")
             lines.append("")
