@@ -53,6 +53,7 @@ class NaverNewsService:
                     {
                         "title": title,
                         "description": description,
+                        "link": item.get("link") or item.get("originallink"),
                         "originallink": item.get("originallink"),
                         "pubDate": item.get("pubDate"),
                     }
@@ -61,6 +62,25 @@ class NaverNewsService:
         except Exception as exc:
             print(f"[WARNING] Naver news search failed for '{query}': {exc}")
             return []
+
+    def search_queries(self, queries: list[str], display_per_query: int = 5, max_items: int = 5) -> list[dict]:
+        collected: list[dict] = []
+        seen = set()
+        for query in queries:
+            for item in self.search_news(query, display=display_per_query):
+                dedupe_key = (
+                    item.get("title"),
+                    item.get("originallink") or item.get("link"),
+                    item.get("pubDate"),
+                )
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                item["query"] = query
+                collected.append(item)
+                if len(collected) >= max_items:
+                    return collected
+        return collected
 
     @staticmethod
     def _clean_text(value: str | None) -> str:

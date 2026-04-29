@@ -21,9 +21,7 @@ def format_index(value) -> str:
 
 
 def format_percent(value) -> str:
-    if is_missing(value):
-        return NA_TEXT
-    return f"{float(value):+.2f}%"
+    return NA_TEXT if is_missing(value) else f"{float(value):+.2f}%"
 
 
 def format_rate_percent(value) -> str:
@@ -96,3 +94,4 @@ def format_signed_multiple(value, suffix: str) -> str:
 
 def format_ratio_metric(value, suffix: str = "%") -> str:
     return NA_TEXT if is_missing(value) else f"{float(value):.1f}{suffix}"
+

@@ -11,6 +11,14 @@ import pandas as pd
 import requests
 import time
 from src.utils import config
+from src.utils.market_assets import (
+    canonicalize_symbol,
+    deduplicate_by_canonical_symbol,
+    has_minimum_top_data,
+    infer_asset_type,
+    is_common_stock_top_eligible,
+    is_etf_etn_top_eligible,
+)
 
 # NEWS constants moved into class or kept global
 NEWS_FETCH_TIMEOUT = 60
@@ -1091,6 +1099,31 @@ class SupabaseReader:
             self._fetch_rows_for_symbols("normalized_stock_short_selling", columns, symbols)
         )
 
+    def fetch_fundamentals_ratio_history(self, symbols, lookback_rows: int = 2000):
+        columns = "symbol, base_date, per, pbr, roe, debt_ratio, source, available_at"
+        rows = self._fetch_rows_for_symbols(
+            "normalized_stock_fundamentals_ratios",
+            columns,
+            symbols,
+            limit=max(lookback_rows, len(symbols) * 10),
+        )
+        history = {}
+        for row in rows:
+            symbol = row.get("symbol")
+            if not symbol:
+                continue
+            history.setdefault(symbol, []).append(row)
+        return history
+
+    def fetch_latest_fundamentals_raw(self, symbols):
+        columns = (
+            "symbol, base_date, revenue, operating_income, net_income, "
+            "total_assets, total_liabilities, total_equity, available_at"
+        )
+        return self._pick_latest_rows_by_symbol(
+            self._fetch_rows_for_symbols("normalized_stock_fundamentals", columns, symbols)
+        )
+
     def fetch_static_universe_stock_snapshot(self):
         static_universe = self.fetch_static_stock_universe()
         symbols = [item["symbol"] for item in static_universe if item.get("symbol")]
@@ -1135,6 +1168,8 @@ class SupabaseReader:
         )
         short_map = self.fetch_latest_short_selling(symbols)
         event_map = self.fetch_latest_stock_events(symbols)
+        raw_fundamentals_map = self.fetch_latest_fundamentals_raw(symbols)
+        ratio_history_map = self.fetch_fundamentals_ratio_history(symbols)
         feature_map = self.fetch_stock_feature_pivot(
             symbols,
             ["return_5d", "moving_avg_5", "moving_avg_20", "volatility_20d", "foreign_flow_zscore"],
@@ -1153,6 +1188,8 @@ class SupabaseReader:
                     "price": price_map.get(symbol, {}),
                     "supply": supply_map.get(symbol, {}),
                     "fundamentals": fundamental_map.get(symbol, {}),
+                    "fundamentals_raw": raw_fundamentals_map.get(symbol, {}),
+                    "fundamentals_history": ratio_history_map.get(symbol, []),
                     "short_selling": short_map.get(symbol, {}),
                     "event": event_map.get(symbol, {}),
                     "features": feature_map.get(symbol, {}),
@@ -1226,11 +1263,14 @@ class SupabaseReader:
                 kosdaq_covered.add(symbol)
             if row.get("close_price") is None:
                 null_close_rows += 1
+            asset_type = infer_asset_type(master.get("name"), market, symbol)
             joined_rows.append(
                 {
                     **row,
                     "name": master.get("name") or symbol,
                     "market": market,
+                    "asset_type": asset_type,
+                    "canonical_symbol": canonicalize_symbol(symbol),
                 }
             )
 
@@ -1240,7 +1280,7 @@ class SupabaseReader:
             "kosdaq_covered": len(kosdaq_covered),
             "null_close_rows": null_close_rows,
         }
-        result["rows"] = joined_rows[: max(limit, 5) * 20]
+        result["rows"] = joined_rows[: max(limit, 5) * 200]
         return result
 
     def fetch_top_volume_stocks_by_market(self, limit=5):
@@ -1254,13 +1294,40 @@ class SupabaseReader:
             "coverage": coverage,
             "KOSPI": [],
             "KOSDAQ": [],
-            "ETF": [],
+            "ETF_ETN": [],
+            "duplicates": [],
+            "excluded_invalid_rows": [],
         }
 
+        deduped_rows, duplicates = deduplicate_by_canonical_symbol(market_rows)
+        result["duplicates"] = duplicates
+        valid_rows = []
+        for row in deduped_rows:
+            if has_minimum_top_data(row):
+                valid_rows.append(row)
+            else:
+                result["excluded_invalid_rows"].append(
+                    {
+                        "symbol": row.get("symbol"),
+                        "canonical_symbol": row.get("canonical_symbol"),
+                        "name": row.get("name"),
+                        "market": row.get("market"),
+                        "asset_type": row.get("asset_type"),
+                        "base_date": row.get("base_date"),
+                        "close_price": row.get("close_price"),
+                        "volume": row.get("volume"),
+                        "trading_value": row.get("trading_value"),
+                    }
+                )
+
         for market_name in ("KOSPI", "KOSDAQ"):
-            filtered = [row for row in market_rows if row.get("market") == market_name]
+            filtered = [
+                row for row in valid_rows
+                if row.get("market") == market_name and is_common_stock_top_eligible(row)
+            ]
             result[market_name] = filtered[:limit]
 
+        etf_candidates = [row for row in valid_rows if is_etf_etn_top_eligible(row)]
         try:
             master_rows = (
                 self.client.table("stocks_master")
@@ -1269,13 +1336,7 @@ class SupabaseReader:
                 .data
                 or []
             )
-        except Exception as exc:
-            print(f"[WARNING] fetch_top_volume_stocks_by_market ETF master failed: {exc}")
-            master_rows = []
-
-        master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
-        etf_pattern = re.compile(r"(KODEX|TIGER|ACE|KBSTAR|SOL|HANARO|ARIRANG|KOSEF|TIMEFOLIO|RISE)", re.IGNORECASE)
-        try:
+            master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
             price_rows = (
                 self.client.table("normalized_stock_prices_daily")
                 .select(
@@ -1289,19 +1350,30 @@ class SupabaseReader:
                 .data
                 or []
             )
+            supplemental = []
+            for row in price_rows:
+                master = master_map.get(row.get("symbol"), {})
+                market = master.get("market")
+                name = master.get("name") or row.get("symbol")
+                asset_type = infer_asset_type(name, market, row.get("symbol"))
+                candidate = {
+                    **row,
+                    "name": name,
+                    "market": market,
+                    "asset_type": asset_type,
+                    "canonical_symbol": canonicalize_symbol(row.get("symbol")),
+                }
+                if is_etf_etn_top_eligible(candidate):
+                    supplemental.append(candidate)
+            supplemental, supplemental_duplicates = deduplicate_by_canonical_symbol(supplemental)
+            result["duplicates"].extend(supplemental_duplicates)
+            etf_candidates.extend([row for row in supplemental if has_minimum_top_data(row)])
         except Exception as exc:
-            print(f"[WARNING] fetch_top_volume_stocks_by_market ETF prices failed: {exc}")
-            price_rows = []
+            print(f"[WARNING] fetch_top_volume_stocks_by_market ETF supplement failed: {exc}")
 
-        etf_rows = []
-        for row in price_rows:
-            symbol = row.get("symbol")
-            master = master_map.get(symbol, {})
-            name = master.get("name") or symbol or ""
-            market = master.get("market")
-            if market == "ETF" or etf_pattern.search(name):
-                etf_rows.append({**row, "name": name, "market": market or "ETF"})
-        result["ETF"] = etf_rows[:limit]
+        etf_candidates, etf_duplicates = deduplicate_by_canonical_symbol(etf_candidates)
+        result["duplicates"].extend(etf_duplicates)
+        result["ETF_ETN"] = etf_candidates[:limit]
         return result
 
     def fetch_report_readiness(self):
