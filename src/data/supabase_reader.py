@@ -18,6 +18,7 @@ from src.utils.market_assets import (
     infer_asset_type,
     is_common_stock_top_eligible,
     is_etf_etn_top_eligible,
+    normalize_market_label,
 )
 
 # NEWS constants moved into class or kept global
@@ -1009,11 +1010,12 @@ class SupabaseReader:
     def _fetch_rows_for_symbols(self, table_name: str, columns: str, symbols: list[str], limit: int = 10000):
         if not symbols:
             return []
+        expanded_symbols = self._expand_symbol_aliases(symbols)
         try:
             response = (
                 self.client.table(table_name)
                 .select(columns)
-                .in_("symbol", symbols)
+                .in_("symbol", expanded_symbols)
                 .order("base_date", desc=True)
                 .limit(limit)
                 .execute()
@@ -1024,21 +1026,40 @@ class SupabaseReader:
             return []
 
     @staticmethod
+    def _expand_symbol_aliases(symbols: list[str]) -> list[str]:
+        aliases = []
+        for symbol in symbols:
+            canonical = canonicalize_symbol(symbol)
+            if not canonical:
+                continue
+            aliases.append(canonical)
+            aliases.append(canonical.lstrip("0") or "0")
+            aliases.append(f"Q{canonical}")
+        deduped = []
+        seen = set()
+        for item in aliases:
+            if item and item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        return deduped
+
+    @staticmethod
     def _pick_latest_rows_by_symbol(rows: list[dict]) -> dict:
         latest_rows = {}
         for row in rows or []:
-            symbol = row.get("symbol")
+            symbol = canonicalize_symbol(row.get("symbol"))
             if symbol and symbol not in latest_rows:
-                latest_rows[symbol] = row
+                latest_rows[symbol] = {**row, "symbol": symbol}
         return latest_rows
 
     @staticmethod
     def _pick_rows_matching_price_date(symbols: list[str], price_map: dict, rows: list[dict]) -> dict:
         grouped = {}
         for row in rows or []:
-            symbol = row.get("symbol")
+            symbol = canonicalize_symbol(row.get("symbol"))
             if not symbol:
                 continue
+            row = {**row, "symbol": symbol}
             grouped.setdefault(symbol, []).append(row)
 
         selected = {}
@@ -1073,7 +1094,7 @@ class SupabaseReader:
         pivoted = {}
         seen = set()
         for row in rows:
-            symbol = row.get("symbol")
+            symbol = canonicalize_symbol(row.get("symbol"))
             feature_name = row.get("feature_name")
             if not symbol or not feature_name:
                 continue
@@ -1124,13 +1145,190 @@ class SupabaseReader:
             self._fetch_rows_for_symbols("normalized_stock_fundamentals", columns, symbols)
         )
 
-    def fetch_static_universe_stock_snapshot(self):
+    def fetch_latest_base_date_and_count(self, table_name: str, date_column: str = "base_date"):
+        latest_date = None
+        row_count = 0
+        try:
+            latest_resp = (
+                self.client.table(table_name)
+                .select(date_column)
+                .order(date_column, desc=True)
+                .limit(1)
+                .execute()
+            )
+            if latest_resp.data:
+                latest_date = latest_resp.data[0].get(date_column)
+            if latest_date:
+                count_resp = (
+                    self.client.table(table_name)
+                    .select(date_column, count="exact")
+                    .eq(date_column, latest_date)
+                    .limit(1)
+                    .execute()
+                )
+                row_count = count_resp.count or 0
+        except Exception as exc:
+            print(f"[WARNING] fetch_latest_base_date_and_count({table_name}) failed: {exc}")
+        return {"base_date": latest_date, "row_count": row_count}
+
+    def fetch_price_rows_by_date(self, base_date: str):
+        if not base_date:
+            return []
+        try:
+            response = (
+                self.client.table("normalized_stock_prices_daily")
+                .select(
+                    "symbol, base_date, open_price, high_price, low_price, close_price, "
+                    "volume, trading_value, market_cap, outstanding_shares, available_at"
+                )
+                .eq("base_date", base_date)
+                .limit(10000)
+                .execute()
+            )
+            return response.data or []
+        except Exception as exc:
+            print(f"[WARNING] fetch_price_rows_by_date failed: {exc}")
+            return []
+
+    def fetch_raw_price_rows_by_date(self, base_date: str):
+        if not base_date:
+            return []
+        candidate_selects = [
+            "symbol, base_date, close, volume, amount, open, high, low",
+            "symbol, base_date, close_price, volume, trading_value, open_price, high_price, low_price",
+            "symbol, base_date, stck_clpr, acml_vol, acml_tr_pbmn, stck_oprc, stck_hgpr, stck_lwpr",
+        ]
+        for columns in candidate_selects:
+            try:
+                response = (
+                    self.client.table("raw_stock_prices_daily")
+                    .select(columns)
+                    .eq("base_date", base_date)
+                    .limit(10000)
+                    .execute()
+                )
+                if response.data is not None:
+                    return response.data or []
+            except Exception:
+                continue
+        return []
+
+    def fetch_stocks_master_map(self):
+        try:
+            response = self.client.table("stocks_master").select("symbol, name, market, is_active, updated_at").execute()
+            rows = response.data or []
+        except Exception as exc:
+            print(f"[WARNING] fetch_stocks_master_map failed: {exc}")
+            rows = []
+        return {canonicalize_symbol(row.get("symbol")): row for row in rows if row.get("symbol")}
+
+    def fetch_price_date_candidates(self, report_base_date: str | None = None, lookback_days: int = 7):
+        candidates: list[str] = []
+        if report_base_date:
+            candidates.append(str(report_base_date))
+        try:
+            response = (
+                self.client.table("normalized_stock_prices_daily")
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(max(lookback_days, 7))
+                .execute()
+            )
+            for row in response.data or []:
+                base_date = str(row.get("base_date"))
+                if base_date and base_date not in candidates:
+                    candidates.append(base_date)
+        except Exception as exc:
+            print(f"[WARNING] fetch_price_date_candidates failed: {exc}")
+        return candidates
+
+    def fetch_price_diagnostics(self, report_base_date: str | None = None, lookback_days: int = 7):
+        master_map = self.fetch_stocks_master_map()
+        latest_normalized = self.fetch_latest_base_date_and_count("normalized_stock_prices_daily")
+        latest_raw = self.fetch_latest_base_date_and_count("raw_stock_prices_daily")
+        candidate_dates = self.fetch_price_date_candidates(report_base_date, lookback_days=lookback_days)
+        evaluated_candidates = []
+
+        for base_date in candidate_dates:
+            rows = self.fetch_price_rows_by_date(base_date)
+            enriched_rows = []
+            market_counts = {}
+            valid_close = 0
+            valid_volume = 0
+            valid_trading_value = 0
+            market_not_null = 0
+            for row in rows:
+                canonical = canonicalize_symbol(row.get("symbol"))
+                master = master_map.get(canonical, {})
+                market = normalize_market_label(master.get("market"))
+                if row.get("close_price") not in (None, "", 0):
+                    valid_close += 1
+                if row.get("volume") not in (None, "", 0):
+                    try:
+                        if float(row.get("volume")) > 0:
+                            valid_volume += 1
+                    except Exception:
+                        pass
+                if row.get("trading_value") not in (None, "", 0):
+                    try:
+                        if float(row.get("trading_value")) > 0:
+                            valid_trading_value += 1
+                    except Exception:
+                        pass
+                if market:
+                    market_not_null += 1
+                    market_counts[market] = market_counts.get(market, 0) + 1
+                enriched_rows.append(
+                    {
+                        **row,
+                        "symbol": canonical,
+                        "canonical_symbol": canonical,
+                        "name": (master.get("name") or canonical),
+                        "market": market,
+                        "asset_type": infer_asset_type(master.get("name"), market, canonical),
+                    }
+                )
+
+            evaluated_candidates.append(
+                {
+                    "base_date": base_date,
+                    "rows": enriched_rows,
+                    "total_rows": len(rows),
+                    "valid_close_rows": valid_close,
+                    "valid_volume_rows": valid_volume,
+                    "valid_trading_value_rows": valid_trading_value,
+                    "market_not_null_rows": market_not_null,
+                    "market_distribution": market_counts,
+                }
+            )
+
+        selected = None
+        if evaluated_candidates:
+            report_candidate = next((item for item in evaluated_candidates if item["base_date"] == str(report_base_date)), None)
+            if report_candidate and report_candidate["valid_close_rows"] >= 500:
+                selected = report_candidate
+            else:
+                selected = max(
+                    evaluated_candidates,
+                    key=lambda item: (item["valid_close_rows"], item["valid_trading_value_rows"], item["base_date"]),
+                )
+
+        return {
+            "report_base_date": report_base_date,
+            "latest_normalized": latest_normalized,
+            "latest_raw": latest_raw,
+            "candidates": evaluated_candidates,
+            "selected": selected,
+            "fallback_used": bool(selected and report_base_date and selected["base_date"] != str(report_base_date)),
+        }
+
+    def fetch_static_universe_stock_snapshot(self, price_base_date: str | None = None):
         static_universe = self.fetch_static_stock_universe()
         symbols = [item["symbol"] for item in static_universe if item.get("symbol")]
         if not symbols:
             return []
 
-        latest_price_base_date = self._get_latest_base_date("normalized_stock_prices_daily")
+        latest_price_base_date = price_base_date or self._get_latest_base_date("normalized_stock_prices_daily")
         price_columns = (
             "symbol, base_date, open_price, high_price, low_price, close_price, "
             "volume, trading_value, market_cap, outstanding_shares, available_at"
@@ -1144,20 +1342,17 @@ class SupabaseReader:
         event_columns = "symbol, base_date, event_type, event_score, sentiment_score, available_at"
 
         try:
-            price_rows = (
-                self.client.table("normalized_stock_prices_daily")
-                .select(price_columns)
-                .eq("base_date", latest_price_base_date)
-                .in_("symbol", symbols)
-                .execute()
-                .data
-                or []
-            )
+            price_rows = self.fetch_price_rows_by_date(latest_price_base_date)
         except Exception as exc:
             print(f"[WARNING] fetch_static_universe_stock_snapshot prices failed: {exc}")
             price_rows = []
 
-        price_map = {row["symbol"]: row for row in price_rows if row.get("symbol")}
+        watchlist_set = set(symbols)
+        price_map = {}
+        for row in price_rows:
+            canonical = canonicalize_symbol(row.get("symbol"))
+            if canonical in watchlist_set and canonical not in price_map:
+                price_map[canonical] = {**row, "symbol": canonical}
         supply_map = self._pick_rows_matching_price_date(
             symbols,
             price_map,
@@ -1177,12 +1372,12 @@ class SupabaseReader:
 
         snapshots = []
         for item in static_universe:
-            symbol = item.get("symbol")
+            symbol = canonicalize_symbol(item.get("symbol"))
             snapshots.append(
                 {
                     "symbol": symbol,
                     "name": item.get("name") or symbol,
-                    "market": item.get("market"),
+                    "market": normalize_market_label(item.get("market")),
                     "source_file": item.get("source_file"),
                     "updated_at": item.get("updated_at"),
                     "price": price_map.get(symbol, {}),
@@ -1197,8 +1392,8 @@ class SupabaseReader:
             )
         return snapshots
 
-    def fetch_full_market_top_volume_stocks(self, limit=5):
-        latest_price_base_date = self._get_latest_base_date("normalized_stock_prices_daily")
+    def fetch_full_market_top_volume_stocks(self, limit=5, price_base_date: str | None = None):
+        latest_price_base_date = price_base_date or self._get_latest_base_date("normalized_stock_prices_daily")
         result = {
             "base_date": latest_price_base_date,
             "coverage": {
@@ -1212,18 +1407,7 @@ class SupabaseReader:
         if not latest_price_base_date:
             return result
 
-        try:
-            master_rows = (
-                self.client.table("stocks_master")
-                .select("symbol, name, market, is_active, updated_at")
-                .in_("market", ["KOSPI", "KOSDAQ"])
-                .execute()
-                .data
-                or []
-            )
-        except Exception as exc:
-            print(f"[WARNING] fetch_full_market_top_volume_stocks master failed: {exc}")
-            return result
+        master_map = self.fetch_stocks_master_map()
 
         try:
             price_rows = (
@@ -1243,7 +1427,6 @@ class SupabaseReader:
             print(f"[WARNING] fetch_full_market_top_volume_stocks prices failed: {exc}")
             return result
 
-        master_map = {row["symbol"]: row for row in master_rows if row.get("symbol")}
         joined_rows = []
         covered = set()
         kospi_covered = set()
@@ -1251,11 +1434,12 @@ class SupabaseReader:
         null_close_rows = 0
 
         for row in price_rows:
-            master = master_map.get(row.get("symbol"))
+            canonical = canonicalize_symbol(row.get("symbol"))
+            master = master_map.get(canonical)
             if not master:
                 continue
-            market = master.get("market")
-            symbol = row.get("symbol")
+            market = normalize_market_label(master.get("market"))
+            symbol = canonical
             covered.add(symbol)
             if market == "KOSPI":
                 kospi_covered.add(symbol)
@@ -1267,10 +1451,11 @@ class SupabaseReader:
             joined_rows.append(
                 {
                     **row,
+                    "symbol": canonical,
                     "name": master.get("name") or symbol,
                     "market": market,
                     "asset_type": asset_type,
-                    "canonical_symbol": canonicalize_symbol(symbol),
+                    "canonical_symbol": canonical,
                 }
             )
 
@@ -1283,8 +1468,8 @@ class SupabaseReader:
         result["rows"] = joined_rows[: max(limit, 5) * 200]
         return result
 
-    def fetch_top_volume_stocks_by_market(self, limit=5):
-        full_market = self.fetch_full_market_top_volume_stocks(limit=limit)
+    def fetch_top_volume_stocks_by_market(self, limit=5, price_base_date: str | None = None):
+        full_market = self.fetch_full_market_top_volume_stocks(limit=limit, price_base_date=price_base_date)
         latest_price_base_date = full_market.get("base_date")
         market_rows = full_market.get("rows") or []
         coverage = full_market.get("coverage") or {}
@@ -1297,6 +1482,9 @@ class SupabaseReader:
             "ETF_ETN": [],
             "duplicates": [],
             "excluded_invalid_rows": [],
+            "candidate_counts_before": {"KOSPI": 0, "KOSDAQ": 0, "ETF_ETN": 0},
+            "candidate_counts_after": {"KOSPI": 0, "KOSDAQ": 0, "ETF_ETN": 0},
+            "empty_reasons": {"KOSPI": [], "KOSDAQ": [], "ETF_ETN": []},
         }
 
         deduped_rows, duplicates = deduplicate_by_canonical_symbol(market_rows)
@@ -1325,7 +1513,16 @@ class SupabaseReader:
                 row for row in valid_rows
                 if row.get("market") == market_name and is_common_stock_top_eligible(row)
             ]
+            result["candidate_counts_before"][market_name] = len(
+                [row for row in deduped_rows if row.get("market") == market_name]
+            )
+            result["candidate_counts_after"][market_name] = len(filtered)
             result[market_name] = filtered[:limit]
+            if not result[market_name]:
+                if not result["candidate_counts_before"][market_name]:
+                    result["empty_reasons"][market_name].append("selected price table에 해당 market row가 없음")
+                elif not result["candidate_counts_after"][market_name]:
+                    result["empty_reasons"][market_name].append("asset_type/common stock 필터 후 후보 0건")
 
         etf_candidates = [row for row in valid_rows if is_etf_etn_top_eligible(row)]
         try:
@@ -1373,7 +1570,16 @@ class SupabaseReader:
 
         etf_candidates, etf_duplicates = deduplicate_by_canonical_symbol(etf_candidates)
         result["duplicates"].extend(etf_duplicates)
+        result["candidate_counts_before"]["ETF_ETN"] = len(
+            [row for row in deduped_rows if row.get("asset_type") in {"ETF", "ETN"}]
+        )
+        result["candidate_counts_after"]["ETF_ETN"] = len(etf_candidates)
         result["ETF_ETN"] = etf_candidates[:limit]
+        if not result["ETF_ETN"]:
+            if not result["candidate_counts_before"]["ETF_ETN"]:
+                result["empty_reasons"]["ETF_ETN"].append("ETF/ETN 분류 후보 0건")
+            elif not result["candidate_counts_after"]["ETF_ETN"]:
+                result["empty_reasons"]["ETF_ETN"].append("유효 가격/거래량/거래대금 조건 통과 후보 0건")
         return result
 
     def fetch_report_readiness(self):

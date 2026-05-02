@@ -1,4 +1,3 @@
-import re
 from typing import Iterable
 
 
@@ -15,6 +14,7 @@ ETF_ETN_PATTERNS = (
     "KOSEF",
     "TIMEFOLIO",
     "RISE",
+    "PLUS",
     "인버스",
     "레버리지",
     "선물",
@@ -59,14 +59,31 @@ def is_q_prefixed(symbol: str | None) -> bool:
     return (symbol or "").strip().upper().startswith("Q")
 
 
+def normalize_market_label(market: str | None) -> str | None:
+    if not market:
+        return None
+    upper = market.strip().upper()
+    mapping = {
+        "J": "KOSPI",
+        "Q": "KOSDAQ",
+        "T": "ETF",
+        "KOSPI": "KOSPI",
+        "KOSDAQ": "KOSDAQ",
+        "ETF": "ETF",
+        "ETN": "ETN",
+        "KONEX": "KONEX",
+    }
+    return mapping.get(upper, upper)
+
+
 def infer_asset_type(name: str | None, market: str | None, symbol: str | None) -> str:
     upper_name = (name or "").upper()
-    upper_market = (market or "").upper()
-    symbol_text = (symbol or "").upper()
+    normalized_market = normalize_market_label(market) or ""
+    symbol_text = canonicalize_symbol(symbol)
 
-    if "ETN" in upper_name:
+    if "ETN" in upper_name or normalized_market == "ETN":
         return "ETN"
-    if upper_market == "ETF" or any(pattern in upper_name for pattern in ETF_ETN_PATTERNS):
+    if normalized_market == "ETF" or any(pattern in upper_name for pattern in ETF_ETN_PATTERNS):
         return "ETF"
     if "ELW" in upper_name:
         return "ELW"
@@ -76,13 +93,13 @@ def infer_asset_type(name: str | None, market: str | None, symbol: str | None) -
         if "SPAC" in upper_name or "스팩" in upper_name:
             return "SPAC"
         return "REIT"
-    if upper_market in {"KOSPI", "KOSDAQ"} and symbol_text:
+    if normalized_market in {"KOSPI", "KOSDAQ"} and symbol_text:
         return "COMMON_STOCK"
     return "UNKNOWN"
 
 
 def is_common_stock_top_eligible(row: dict) -> bool:
-    return row.get("market") in {"KOSPI", "KOSDAQ"} and row.get("asset_type") == "COMMON_STOCK"
+    return normalize_market_label(row.get("market")) in {"KOSPI", "KOSDAQ"} and row.get("asset_type") == "COMMON_STOCK"
 
 
 def is_etf_etn_top_eligible(row: dict) -> bool:
@@ -93,13 +110,17 @@ def has_minimum_top_data(row: dict) -> bool:
     close_price = row.get("close_price")
     volume = row.get("volume")
     trading_value = row.get("trading_value")
-    return (
-        close_price is not None
-        and volume is not None
-        and trading_value is not None
-        and float(volume) > 0
-        and float(trading_value) > 0
-    )
+    try:
+        return (
+            close_price is not None
+            and volume is not None
+            and trading_value is not None
+            and float(close_price) > 0
+            and float(volume) > 0
+            and float(trading_value) > 0
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def pick_preferred_duplicate(rows: Iterable[dict]) -> dict | None:
@@ -126,6 +147,7 @@ def deduplicate_by_canonical_symbol(rows: list[dict]) -> tuple[list[dict], list[
             "canonical_symbol": canonical,
             "display_symbol": canonical or row.get("symbol"),
             "join_symbol": row.get("symbol"),
+            "market": normalize_market_label(row.get("market")),
         }
         grouped.setdefault(canonical, []).append(normalized)
 
