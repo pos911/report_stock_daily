@@ -193,3 +193,27 @@ def label_for_column(column_name: str) -> str:
     }
     return mapping.get(column_name, column_name)
 
+
+def normalize_ranking_source(source: str | None) -> str | None:
+    if not source:
+        return None
+    return source.strip().upper()
+
+
+def ranking_market_matches_master(ranking_market: str | None, master_market: str | None) -> bool:
+    normalized_ranking_market = normalize_market_label(ranking_market)
+    normalized_master_market = normalize_market_label(master_market)
+    if normalized_ranking_market == "KOSPI200":
+        return True
+    return bool(normalized_ranking_market and normalized_master_market and normalized_ranking_market == normalized_master_market)
+
+
+def is_allowed_ranking_source(rank_type: str | None, source: str | None) -> bool:
+    normalized_rank_type = (rank_type or "").strip().lower()
+    normalized_source = normalize_ranking_source(source)
+    if normalized_rank_type == "volume":
+        return normalized_source in {"KIS", "KRX", "VALID_PRICE_FALLBACK"}
+    if normalized_rank_type in {"trading_value", "market_cap"}:
+        return normalized_source in {"KRX", "VALID_PRICE_FALLBACK"}
+    return False
+

@@ -51,6 +51,8 @@ STATIC_SAMPLE_SYMBOLS = {"005930", "000660", "058470", "071050", "278470"}
 def _parse_args():
     parser = argparse.ArgumentParser(description="Daily Quant Report Generator")
     parser.add_argument("--type", dest="report_type", default="regular")
+    parser.add_argument("--dry-run", action="store_true", help="Generate report only and skip Telegram sending.")
+    parser.add_argument("--no-send", action="store_true", help="Generate report only and skip Telegram sending.")
     args = parser.parse_args()
     report_type = (args.report_type or "regular").strip().lower()
     if report_type not in VALID_REPORT_TYPES:
@@ -100,24 +102,7 @@ def _clean_report_text(report_content: str) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _format_market_flow(value) -> str:
-    numeric = _safe_float(value)
-    if numeric is None:
-        return NA_TEXT
-    if numeric == 0:
-        return "0"
-    return format_flow_amount(numeric)
-
-
-def _build_data_status(readiness: dict) -> str:
-    if not readiness.get("minimum_report_ready"):
-        return "위험"
-    if readiness.get("full_market_coverage_pass"):
-        return "정상"
-    return "경고"
-
-
-def _truncate_text(text: str, max_len: int = 70) -> str:
+def _truncate_text(text: str, max_len: int = 110) -> str:
     stripped = (text or "").strip()
     if len(stripped) <= max_len:
         return stripped
@@ -136,6 +121,15 @@ def _extract_docs_matches(news_text: str, keywords: list[str], max_matches: int 
         if len(matches) >= max_matches:
             break
     return matches
+
+
+def _format_market_flow(value) -> str:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return NA_TEXT
+    if numeric == 0:
+        return "0"
+    return format_flow_amount(numeric)
 
 
 def _diagnose_supply_unit(snapshot: dict) -> dict:
@@ -219,7 +213,6 @@ def _diagnose_fundamentals(snapshot: dict) -> dict:
             display[key] = format_multiple(value, "배")
         else:
             display[key] = format_ratio_metric(value)
-
     return {"display": display, "needs_review": needs_review}
 
 
@@ -274,32 +267,21 @@ def _build_quant_comment(snapshot: dict) -> str:
     pbr_display = fundamentals_diag.get("display", {}).get("pbr", NA_TEXT)
 
     if return_5d is not None:
-        if return_5d > 0:
-            parts.append("최근 5일 수익률은 양호")
-        elif return_5d < 0:
-            parts.append("최근 5일 수익률은 부진")
-
+        parts.append("최근 5일 수익률은 양호" if return_5d > 0 else "최근 5일 수익률은 부진" if return_5d < 0 else "최근 5일 수익률은 중립")
     if vol_20d is not None:
-        if vol_20d >= 0.05:
-            parts.append("20일 변동성이 높아 추격 매수는 신중")
-        else:
-            parts.append("20일 변동성은 과도하지 않음")
-
+        parts.append("20일 변동성이 높아 추격 매수는 신중" if vol_20d >= 0.05 else "20일 변동성은 과도하지 않음")
     if zscore is not None:
         if zscore >= 1:
             parts.append("외국인 수급 강도는 우호적")
         elif zscore <= -1:
             parts.append("외국인 수급 강도는 부담")
-
     if foreign_holding is not None and foreign_holding >= 10:
         parts.append("외국인 보유율은 비교적 안정적")
-
     if per_display == "N/A(점검필요)" or pbr_display == "N/A(점검필요)":
         parts.append("밸류에이션 수치는 점검 전까지 판단 유보")
-
     if not parts:
         return "현재 공개된 가격·수급·밸류 지표만으로는 방향성을 단정하기보다 관망이 적절합니다."
-    return _truncate_text(". ".join(parts) + ".", max_len=110)
+    return _truncate_text(". ".join(parts) + ".")
 
 
 def _build_news_queries(stock: dict) -> list[str]:
@@ -315,22 +297,20 @@ def _build_news_queries(stock: dict) -> list[str]:
 
 def _build_fallback_reason(stock: dict, docs_matches: list[str], event_row: dict | None) -> str:
     name = stock.get("name") or ""
-    asset_type = stock.get("asset_type") or "UNKNOWN"
     themes = extract_theme_keywords(name)
+    asset_type = stock.get("asset_type") or "UNKNOWN"
     if docs_matches:
-        return _truncate_text(docs_matches[0], max_len=90)
+        return _truncate_text(docs_matches[0], 100)
     if event_row and event_row.get("event_type"):
         return f"최근 공시 이벤트({event_row.get('event_type')})가 거래 관심을 자극한 것으로 보입니다."
     if asset_type in {"ETF", "ETN"} and themes:
         return f"{', '.join(themes[:2])} 관련 변동성이 상품 거래를 자극한 것으로 보입니다."
     if themes:
         return f"{', '.join(themes[:2])} 테마 연관성으로 거래가 집중된 것으로 보입니다."
-    if _safe_float(stock.get("trading_value")) is not None:
-        return "거래대금 상위권 진입으로 단기 수급 집중이 확인됩니다."
-    return "관련 뉴스 확인은 제한적이나 단기 매매 수요가 유입된 것으로 보입니다."
+    return "최근 거래 집중이 확인돼 단기 수급 유입 가능성을 점검할 필요가 있습니다."
 
 
-def _generate_top_volume_reason(
+def _generate_ranked_reason(
     stock: dict,
     naver_service: NaverNewsService,
     analyzer: GeminiAnalyzer | None,
@@ -351,20 +331,27 @@ def _generate_top_volume_reason(
     docs_matches = _extract_docs_matches(news_text, keywords, max_matches=3)
     event_row = event_map.get(canonicalize_symbol(stock.get("symbol"))) if event_map else None
 
-    if analyzer and news_items:
+    if analyzer and (news_items or docs_matches or event_row):
         try:
             gemini_tracker["count"] += 1
-            gemini_tracker["purposes"].append(f"top_volume_reason:{stock.get('display_symbol')}")
+            gemini_tracker["purposes"].append(f"rank_reason:{stock.get('rank_type')}:{stock.get('display_symbol')}")
             reason = analyzer.generate_top_volume_reason(
                 {
-                    "name": stock.get("name"),
                     "symbol": stock.get("display_symbol") or stock.get("symbol"),
+                    "name": stock.get("name"),
                     "market": stock.get("market"),
                     "asset_type": stock.get("asset_type"),
+                    "rank_type": stock.get("rank_type"),
+                    "rank": stock.get("rank"),
+                    "source": stock.get("source"),
+                    "ranking_base_date": stock.get("ranking_base_date"),
+                    "price_base_date": stock.get("price_base_date"),
                     "close_price": stock.get("close_price"),
                     "volume": stock.get("volume"),
                     "trading_value": stock.get("trading_value"),
-                    "naver_news": [
+                    "market_cap": stock.get("market_cap"),
+                    "change_rate": stock.get("change_rate"),
+                    "recent_news": [
                         {
                             "title": item.get("title"),
                             "summary": item.get("description"),
@@ -385,20 +372,18 @@ def _generate_top_volume_reason(
                 }
             )
             if reason:
-                return _truncate_text(reason.strip().lstrip("- "), max_len=100)
+                return _truncate_text(reason.strip().lstrip("- "), 100)
         except Exception as exc:
-            logger.warning("Gemini top volume reason fallback for %s: %s", stock.get("name"), exc)
+            logger.warning("Gemini ranking reason fallback for %s: %s", stock.get("name"), exc)
 
     if news_items:
-        news = news_items[0]
-        title = (news.get("title") or "").replace("<b>", "").replace("</b>", "")
-        origin = news.get("query") or news.get("originallink") or news.get("link") or "최근 뉴스"
-        return _truncate_text(f"{title} 관련 보도가 확인됐고, 검색 키워드 {origin} 기준으로 거래가 집중됐습니다.", max_len=100)
+        title = (news_items[0].get("title") or "").replace("<b>", "").replace("</b>", "")
+        return _truncate_text(f"{title} 관련 보도가 확인돼 거래 집중 배경으로 해석됩니다.", 100)
 
     return _build_fallback_reason(stock, docs_matches, event_row)
 
 
-def _prepare_static_snapshots(static_snapshots: list[dict]) -> tuple[list[dict], dict]:
+def _prepare_watchlist_snapshots(static_snapshots: list[dict]) -> tuple[list[dict], dict]:
     prepared = []
     diagnostics = {
         "supply_unit_needs_review": False,
@@ -406,7 +391,6 @@ def _prepare_static_snapshots(static_snapshots: list[dict]) -> tuple[list[dict],
         "short_ratio_needs_review": False,
         "watchlist_missing_prices": [],
     }
-
     for snapshot in static_snapshots:
         supply_diag = _diagnose_supply_unit(snapshot)
         fundamentals_diag = _diagnose_fundamentals(snapshot)
@@ -435,123 +419,111 @@ def _prepare_static_snapshots(static_snapshots: list[dict]) -> tuple[list[dict],
     return prepared, diagnostics
 
 
-def _build_stockdata_fix_text(
-    price_diagnostics: dict,
-    top_volume: dict,
-    prepared_snapshots: list[dict],
-    diagnostics: dict,
-) -> str:
-    selected = price_diagnostics.get("selected") or {}
-    latest_raw = price_diagnostics.get("latest_raw") or {}
-    latest_normalized = price_diagnostics.get("latest_normalized") or {}
-    watchlist_missing = diagnostics.get("watchlist_missing_prices") or []
-
-    lines = [
-        "pos911/StockData 레포에서 다음 문제를 수정하라.",
-        f"- normalized_stock_prices_daily의 {selected.get('base_date')} valid rows가 {selected.get('valid_close_rows', 0):,}건으로 보이며 latest raw row count {latest_raw.get('row_count', 0):,}건과 차이가 난다.",
-        f"- latest normalized base_date={latest_normalized.get('base_date')} row_count={latest_normalized.get('row_count', 0):,}, latest raw base_date={latest_raw.get('base_date')} row_count={latest_raw.get('row_count', 0):,}를 기준으로 정규화 누락 여부를 점검하라.",
-        "- raw_stock_prices_daily에서 stck_clpr/acml_vol/acml_tr_pbmn -> close_price/volume/trading_value 매핑이 누락되거나 null 처리되는지 확인하라.",
-        "- symbol을 6자리 문자열로 통일하고 stocks_master/static_stock_universe/normalized_stock_prices_daily 간 join 가능하게 수정하라.",
-        "- market 값을 KOSPI/KOSDAQ/ETF/ETN으로 표준화하고, ETN/ETF가 일반주 KOSPI Top5에 섞이지 않도록 asset_type 분리를 강화하라.",
-        "- 변환 후 base_date별 total_rows, valid_close_rows, valid_volume_rows, valid_trading_value_rows, market_not_null_rows를 로그에 남겨라.",
-    ]
-    if diagnostics["valuation_zero_needs_review"]:
-        lines.append("- normalized_stock_fundamentals_ratios에서 수집 실패 시 0 대신 null 적재로 바꾸고 per/pbr/roe/debt_ratio 0값 대량 발생 여부를 검증하라.")
-    if diagnostics["short_ratio_needs_review"]:
-        lines.append("- normalized_stock_short_selling에서 short_value/short_volume가 양수인데 short_ratio가 0/null인 row를 점검하고, 계산 불가 시 0 대신 null을 적재하라.")
-    if diagnostics["supply_unit_needs_review"]:
-        lines.append("- normalized_stock_supply_daily net_buy 계열 컬럼 단위를 spec과 코드에 명시하라. 수량/금액 혼동이 없도록 metadata 또는 컬럼 분리를 검토하라.")
-    if watchlist_missing:
-        samples = ", ".join(f"{item.get('name')}({item.get('symbol')})" for item in watchlist_missing[:5])
-        lines.append(f"- static 관심종목 가격 누락 샘플: {samples}")
-    return "\n".join(lines)
+def _build_reader_bundle(reader: SupabaseReader, report_type: str) -> dict:
+    macro = reader.fetch_latest_global_macro_snapshot()
+    report_base_date = macro.get("base_date")
+    ranking_bundle = reader.get_latest_market_rankings(report_date=report_base_date, limit=10)
+    watchlist_bundle = reader.get_watchlist_snapshots(report_date=report_base_date)
+    return {
+        "report_type": report_type,
+        "macro": macro,
+        "breadth": reader.fetch_latest_market_breadth(),
+        "derivatives": reader.fetch_latest_derivatives_snapshot(),
+        "readiness": reader.fetch_report_readiness(),
+        "ranking_bundle": ranking_bundle,
+        "watchlist_bundle": watchlist_bundle,
+    }
 
 
-def _log_price_diagnostics(
-    price_diagnostics: dict,
-    top_volume: dict,
-    prepared_snapshots: list[dict],
-    gemini_tracker: dict,
-):
-    selected = price_diagnostics.get("selected") or {}
-    logger.info("report_base_date=%s", price_diagnostics.get("report_base_date"))
-    logger.info("price_base_date=%s", selected.get("base_date"))
-    logger.info("macro_base_date=%s", price_diagnostics.get("report_base_date"))
-    logger.info(
-        "latest available base_date in normalized_stock_prices_daily=%s row_count=%s",
-        price_diagnostics.get("latest_normalized", {}).get("base_date"),
-        price_diagnostics.get("latest_normalized", {}).get("row_count"),
-    )
-    logger.info(
-        "latest available base_date in raw_stock_prices_daily=%s row_count=%s",
-        price_diagnostics.get("latest_raw", {}).get("base_date"),
-        price_diagnostics.get("latest_raw", {}).get("row_count"),
-    )
-    logger.info("selected price date after fallback=%s", selected.get("base_date"))
-    logger.info("total rows by selected price date=%s", selected.get("total_rows", 0))
-    logger.info("valid rows where close_price > 0=%s", selected.get("valid_close_rows", 0))
-    logger.info("valid rows where volume > 0=%s", selected.get("valid_volume_rows", 0))
-    logger.info("valid rows where trading_value > 0=%s", selected.get("valid_trading_value_rows", 0))
-    logger.info("rows with market not null=%s", selected.get("market_not_null_rows", 0))
-    logger.info("rows grouped by market=%s", selected.get("market_distribution", {}))
-    logger.info("Top5 candidate count by market before Gemini call=%s", top_volume.get("candidate_counts_before", {}))
-    logger.info("Top5 candidate count by market after filter=%s", top_volume.get("candidate_counts_after", {}))
+def _build_data_status(readiness: dict) -> str:
+    if not readiness.get("minimum_report_ready"):
+        return "위험"
+    if readiness.get("ranking_ready") and readiness.get("watchlist_ready"):
+        return "정상"
+    return "경고"
 
-    hit_count = 0
+
+def _log_report_diagnostics(bundle: dict, prepared_snapshots: list[dict], gemini_tracker: dict):
+    ranking_bundle = bundle["ranking_bundle"]
+    watchlist_bundle = bundle["watchlist_bundle"]
+    readiness = bundle["readiness"]
+    ranking_diag = ranking_bundle.get("diagnostics") or {}
+    logger.info("ranking_base_date=%s", ranking_bundle.get("ranking_base_date"))
+    logger.info("price_base_date=%s", ranking_bundle.get("price_base_date"))
+    logger.info("latest_valid_price_date=%s", readiness.get("latest_valid_price_date"))
+    logger.info("market_master_status=%s", readiness.get("market_master_status"))
+    logger.info("ranking_status=%s", readiness.get("ranking_status"))
+    logger.info("watchlist_price_hit_ratio=%.3f", readiness.get("watchlist_price_hit_ratio") or 0.0)
+    logger.info("ranking_counts=%s", ranking_diag.get("ranking_counts", {}))
+    logger.info("fallback_applied_sections=%s", ranking_bundle.get("fallback_applied_sections", []))
+    logger.info("market_mismatch_rows=%s", len(ranking_diag.get("market_mismatch_rows", [])))
+    logger.info("q_prefix_rows=%s", len(ranking_diag.get("q_prefix_rows", [])))
+    if ranking_diag.get("q_prefix_rows"):
+        logger.error("FAIL_SYMBOL_NORMALIZATION q_prefix_rows=%s", ranking_diag.get("q_prefix_rows"))
     for snapshot in prepared_snapshots:
-        price = snapshot.get("price") or {}
-        symbol = snapshot.get("symbol")
-        if price.get("close_price") not in (None, ""):
-            hit_count += 1
-        if symbol in STATIC_SAMPLE_SYMBOLS:
+        if snapshot.get("symbol") in STATIC_SAMPLE_SYMBOLS:
+            price = snapshot.get("price") or {}
             logger.info(
-                "static sample symbol=%s normalized_symbol=%s selected_price_date=%s price_row_exists=%s close_price=%s volume=%s trading_value=%s joined_market=%s joined_name=%s fallback_source_used=%s",
+                "watchlist_sample symbol=%s price_base_date=%s close_price=%s volume=%s trading_value=%s market=%s name=%s",
                 snapshot.get("symbol"),
-                canonicalize_symbol(symbol),
-                selected.get("base_date"),
-                bool(price),
+                price.get("base_date"),
                 price.get("close_price"),
                 price.get("volume"),
                 price.get("trading_value"),
                 snapshot.get("market"),
                 snapshot.get("name"),
-                price_diagnostics.get("fallback_used"),
             )
-    logger.info("static watchlist price hit ratio=%s/%s", hit_count, len(prepared_snapshots))
+    logger.info("watchlist_count=%s", len(watchlist_bundle.get("snapshots") or []))
     logger.info("Gemini call count and purpose=%s / %s", gemini_tracker["count"], gemini_tracker["purposes"])
 
 
-def _build_header_lines(
-    title: str,
-    now_kst: datetime.datetime,
-    readiness: dict,
-    price_diagnostics: dict,
-    diagnostics: dict,
-) -> list[str]:
-    selected = price_diagnostics.get("selected") or {}
-    data_status = _build_data_status(readiness)
+def _build_stockdata_fix_text(bundle: dict, diagnostics: dict) -> str:
+    ranking_bundle = bundle["ranking_bundle"]
+    watchlist_bundle = bundle["watchlist_bundle"]
+    ranking_diag = ranking_bundle.get("diagnostics") or {}
+    lines = ["pos911/StockData 레포에서 다음 문제를 수정하라."]
+    if ranking_diag.get("market_mismatch_rows"):
+        lines.append("- normalized_market_rankings_daily와 stocks_master.market 불일치 row를 정리하라.")
+    if ranking_diag.get("q_prefix_rows"):
+        lines.append("- normalized_market_rankings_daily 또는 normalized_stock_prices_daily에 Q-prefix symbol이 남아 있지 않도록 canonical 6자리 숫자로 정규화하라.")
+    if ranking_diag.get("legacy_source_rows"):
+        lines.append("- rank_type이 trading_value/market_cap인 row에 source='KIS'가 들어오지 않도록 legacy source를 차단하라.")
+    if ranking_bundle.get("fallback_applied_sections"):
+        lines.append(f"- ranking row 부족으로 가격 fallback이 사용된 섹션: {', '.join(ranking_bundle.get('fallback_applied_sections', []))}")
+    if diagnostics.get("watchlist_missing_prices"):
+        samples = ", ".join(f"{item.get('name')}({item.get('symbol')})" for item in diagnostics["watchlist_missing_prices"][:5])
+        lines.append(f"- static 관심종목 가격 누락 샘플: {samples}")
+    if diagnostics.get("valuation_zero_needs_review"):
+        lines.append("- normalized_stock_fundamentals_ratios에서 수집 실패 시 0 대신 null 적재로 바꾸고 ratio 0값 대량 발생 여부를 검증하라.")
+    if diagnostics.get("short_ratio_needs_review"):
+        lines.append("- normalized_stock_short_selling에서 short_value/short_volume가 양수인데 short_ratio가 0/null인 row를 점검하라.")
+    if diagnostics.get("supply_unit_needs_review"):
+        lines.append("- normalized_stock_supply_daily net_buy 계열 컬럼 단위를 spec과 코드에 명확히 정의하라.")
+    lines.append(
+        f"- 최신 ranking_base_date={ranking_bundle.get('ranking_base_date')}, price_base_date={watchlist_bundle.get('price_base_date')} 기준으로 rank/price join 품질을 재점검하라."
+    )
+    return "\n".join(lines)
+
+
+def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict, ranking_bundle: dict, diagnostics: dict) -> list[str]:
     lines = [
         f"# {title}",
         f"- 작성시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')}",
-        "- 수치 기준: Supabase StockData 최신 적재값",
-        f"- 가격 기준일: {format_date(selected.get('base_date'))}",
+        "- 수치 기준: Supabase StockData 공식 테이블",
+        f"- 랭킹 기준일: {format_date(ranking_bundle.get('ranking_base_date'))}",
+        f"- 가격 기준일: {format_date(ranking_bundle.get('price_base_date'))}",
         f"- 매크로 기준일: {format_date(readiness.get('latest_macro_date'))}",
-        f"- minimum_report_ready: {'true' if readiness.get('minimum_report_ready') else 'false'}",
-        f"- full_market_coverage_pass: {'true' if readiness.get('full_market_coverage_pass') else 'false'}",
-        f"- coverage_status: {readiness.get('coverage_status') or 'LIMITED'}",
-        f"- 데이터 점검: {data_status}",
-        f"- 전체시장 커버리지: {readiness.get('coverage_status') or 'LIMITED'}",
-        f"- 전체시장 가격 커버리지: {(readiness.get('price_coverage') or {}).get('covered_symbols', 0):,}종목",
-        f"- daily_stock_full_price_pipeline 최신 처리건수: {(readiness.get('latest_full_price_records_processed') or 0):,}",
+        "- 관심종목 기준: static_stock_universe.enabled=true",
+        f"- market master 상태: {readiness.get('market_master_status')}",
+        f"- 랭킹 데이터 상태: {readiness.get('ranking_status')}",
+        f"- 가격 데이터 상태: {readiness.get('price_status')}",
+        f"- watchlist price hit ratio: {readiness.get('watchlist_price_hit_ratio', 0):.1%}",
+        f"- 데이터 점검: {_build_data_status(readiness)}",
     ]
-    if price_diagnostics.get("fallback_used"):
-        lines.append(
-            f"- 가격 데이터는 {format_date(price_diagnostics.get('report_base_date'))} 기준 커버리지가 부족하여 {format_date(selected.get('base_date'))} 기준 데이터를 사용했습니다."
-        )
-    if readiness.get("coverage_status") == "PARTIAL":
-        lines.append("- 전체시장 거래량 상위 분석은 커버리지 부족으로 참고용")
-    if (readiness.get("latest_full_price_records_processed") or 0) <= 2000:
-        lines.append("- full market run 미완료 가능성")
+    if ranking_bundle.get("fallback_used"):
+        lines.append("- 랭킹 데이터는 최근 기준일 fallback이 포함돼 있습니다.")
+    if ranking_bundle.get("fallback_applied_sections"):
+        lines.append(f"- 가격 fallback 사용 섹션: {', '.join(ranking_bundle.get('fallback_applied_sections', []))}")
     if diagnostics["supply_unit_needs_review"]:
         lines.append("- 수급 단위 확인 필요")
     if diagnostics["valuation_zero_needs_review"]:
@@ -602,14 +574,12 @@ def _build_market_impact_lists(macro: dict) -> tuple[list[str], list[str], list[
     if (_safe_float(macro.get("nasdaq_change_rate")) or 0) > 0:
         positives.append(f"NASDAQ가 {format_percent(macro.get('nasdaq_change_rate'))}로 마감해 성장주 심리에는 우호적입니다.")
     if (_safe_float(macro.get("sp500_change_rate")) or 0) > 0:
-        positives.append(f"S&P500이 {format_percent(macro.get('sp500_change_rate'))}로 마감해 미국 대형주 전반의 위험 선호가 완전히 꺾이지는 않았습니다.")
+        positives.append(f"S&P500이 {format_percent(macro.get('sp500_change_rate'))}로 마감해 미국 대형주 전반의 투자심리가 급격히 꺾이지는 않았습니다.")
     if (_safe_float(macro.get("usdkrw")) or 0) >= 1450:
         burdens.append(f"원/달러 환율이 {format_usdkrw(macro.get('usdkrw'))} 수준이라 외국인 수급에는 부담입니다.")
     if (_safe_float(macro.get("us10y")) or 0) >= 4.3:
         burdens.append(f"미국 10년물이 {format_rate_percent(macro.get('us10y'))}로 높아 밸류에이션 부담이 이어질 수 있습니다.")
-    if (_safe_float(macro.get("wti")) or 0) >= 90:
-        burdens.append(f"WTI가 {format_plain_number(macro.get('wti'))} 수준으로 높아 유가 부담 점검이 필요합니다.")
-    watchpoints.append(f"KOSPI {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))}), KOSDAQ {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))}) 흐름과 함께 보아야 합니다.")
+    watchpoints.append(f"KOSPI {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))}), KOSDAQ {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))}) 흐름을 함께 봐야 합니다.")
     watchpoints.append(f"KOSPI 외국인 {_format_market_flow(macro.get('kospi_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kospi_institutional_net_buy'))} 수급을 확인할 필요가 있습니다.")
     if not positives:
         positives.append("미국 지수의 위험 선호 신호는 남아 있으나 강도는 제한적입니다.")
@@ -618,7 +588,7 @@ def _build_market_impact_lists(macro: dict) -> tuple[list[str], list[str], list[
     return positives[:3], burdens[:3], watchpoints[:3]
 
 
-def _infer_market_judgment(macro: dict, breadth: dict, readiness: dict) -> str:
+def _infer_market_judgment(macro: dict, breadth: dict) -> str:
     score = 0
     for field in ("kospi_change_rate", "kosdaq_change_rate", "sp500_change_rate", "nasdaq_change_rate"):
         value = _safe_float(macro.get(field))
@@ -628,8 +598,6 @@ def _infer_market_judgment(macro: dict, breadth: dict, readiness: dict) -> str:
     declines = _safe_float(breadth.get("declines"))
     if advances is not None and declines is not None:
         score += 1 if advances > declines else -1 if advances < declines else 0
-    if not readiness.get("full_market_coverage_pass"):
-        score = max(-1, min(1, score))
     if score >= 2:
         return "우호"
     if score <= -2:
@@ -637,53 +605,99 @@ def _infer_market_judgment(macro: dict, breadth: dict, readiness: dict) -> str:
     return "중립"
 
 
-def _format_top_volume_sections(
-    top_volume: dict,
-    price_diagnostics: dict,
+def _format_ranked_market_section(
+    title: str,
+    rows: list[dict],
+    ranking_bundle: dict,
     naver_service: NaverNewsService,
     analyzer: GeminiAnalyzer | None,
     news_text: str,
     event_map: dict,
     gemini_tracker: dict,
 ) -> list[str]:
-    title = "## 거래량 상위 종목 테마"
-    if price_diagnostics.get("fallback_used") or price_diagnostics.get("selected", {}).get("valid_close_rows", 0) < 2000:
-        title += " - 커버리지 부족으로 참고용"
-    lines = [
-        title,
-        f"_기준일: {format_date((price_diagnostics.get('selected') or {}).get('base_date'))} (`normalized_stock_prices_daily`)_",
-    ]
+    lines = [f"[{title}]"]
+    if not rows:
+        lines.append("- 생성 불가: 해당 랭킹 데이터가 없어 fallback까지 확인했지만 후보를 만들지 못했습니다.")
+        return lines
 
-    for market_key, section_name in (("KOSPI", "KOSPI Top 5"), ("KOSDAQ", "KOSDAQ Top 5"), ("ETF_ETN", "ETF/ETN Top 5")):
-        lines.append(f"[{section_name}]")
-        rows = top_volume.get(market_key) or []
-        if not rows:
-            reasons = "; ".join(top_volume.get("empty_reasons", {}).get(market_key, []) or ["후보 0건"])
-            lines.append(
-                f"- 생성 불가: {format_date((price_diagnostics.get('selected') or {}).get('base_date'))} 기준 {market_key} 후보 {top_volume.get('candidate_counts_after', {}).get(market_key, 0)}건"
-            )
-            lines.append(f"- 원인: {reasons}")
-            lines.append("- 조치: StockData normalized_stock_prices_daily의 market/symbol 정규화 확인 필요")
-            lines.append("")
-            continue
-
-        for index, stock in enumerate(rows[:5], 1):
-            reason = _generate_top_volume_reason(stock, naver_service, analyzer, news_text, event_map, gemini_tracker)
-            lines.append(
-                f"{index}) {stock.get('name')}({stock.get('display_symbol') or stock.get('symbol')}) | 종가 {format_price(stock.get('close_price'))} | 거래량 {format_volume(stock.get('volume'))} | 거래대금 {format_trading_value(stock.get('trading_value'))}"
-            )
-            lines.append(f"   - 주목 사유: {reason}")
-        lines.append("")
-
+    seen_reasons = set()
+    for index, stock in enumerate(rows[:5], 1):
+        reason = _generate_ranked_reason(stock, naver_service, analyzer, news_text, event_map, gemini_tracker)
+        if reason in seen_reasons:
+            reason = _build_fallback_reason(stock, [], event_map.get(canonicalize_symbol(stock.get("symbol"))) if event_map else None)
+        seen_reasons.add(reason)
+        rank_label = f"{stock.get('rank')}" if stock.get("rank") is not None else index
+        lines.append(
+            f"{rank_label}) {stock.get('name')}({stock.get('display_symbol') or stock.get('symbol')}) | 종가 {format_price(stock.get('close_price'))} | 거래량 {format_volume(stock.get('volume'))} | 거래대금 {format_trading_value(stock.get('trading_value'))} | source {stock.get('source') or NA_TEXT}"
+        )
+        lines.append(f"   - 주목 사유: {reason}")
     return lines
 
 
-def _format_static_section(prepared_snapshots: list[dict]) -> list[str]:
+def _format_volume_sections(
+    ranking_bundle: dict,
+    naver_service: NaverNewsService,
+    analyzer: GeminiAnalyzer | None,
+    news_text: str,
+    event_map: dict,
+    gemini_tracker: dict,
+) -> list[str]:
+    sections = ranking_bundle.get("sections", {})
+    volume_map = sections.get("volume", {})
     lines = [
-        "## Static 관심종목 요약",
-        f"- Static 관심종목: {len(prepared_snapshots):,}개",
-        "_기준 universe: `static_stock_universe.enabled = true`_",
+        "## 거래량 상위 종목",
+        f"_랭킹 기준일: {format_date(ranking_bundle.get('ranking_base_date'))}_",
     ]
+    for market in ("KOSPI", "KOSDAQ", "ETF", "ETN"):
+        lines.extend(
+            _format_ranked_market_section(
+                f"{market} 거래량 Top 5",
+                volume_map.get(market) or [],
+                ranking_bundle,
+                naver_service,
+                analyzer,
+                news_text,
+                event_map,
+                gemini_tracker,
+            )
+        )
+        lines.append("")
+    return lines
+
+
+def _format_trading_value_sections(
+    ranking_bundle: dict,
+    naver_service: NaverNewsService,
+    analyzer: GeminiAnalyzer | None,
+    news_text: str,
+    event_map: dict,
+    gemini_tracker: dict,
+) -> list[str]:
+    sections = ranking_bundle.get("sections", {})
+    trading_map = sections.get("trading_value", {})
+    lines = [
+        "## 거래대금 상위 종목",
+        f"_랭킹 기준일: {format_date(ranking_bundle.get('ranking_base_date'))}_",
+    ]
+    for market in ("KOSPI", "KOSDAQ"):
+        lines.extend(
+            _format_ranked_market_section(
+                f"{market} 거래대금 Top 5",
+                trading_map.get(market) or [],
+                ranking_bundle,
+                naver_service,
+                analyzer,
+                news_text,
+                event_map,
+                gemini_tracker,
+            )
+        )
+        lines.append("")
+    return lines
+
+
+def _format_watchlist_section(prepared_snapshots: list[dict], title: str = "## Static 관심종목 요약") -> list[str]:
+    lines = [title, f"- Static 관심종목: {len(prepared_snapshots):,}개", "_기준 universe: `static_stock_universe.enabled = true`_"]
     for index, snapshot in enumerate(prepared_snapshots, 1):
         price = snapshot.get("price") or {}
         supply = snapshot.get("supply") or {}
@@ -693,10 +707,8 @@ def _format_static_section(prepared_snapshots: list[dict]) -> list[str]:
         supply_diag = snapshot.get("supply_diag") or {}
         fundamentals_diag = snapshot.get("fundamentals_diag") or {}
         short_diag = snapshot.get("short_diag") or {}
-
         return_5d = _safe_float(features.get("return_5d"))
         return_5d_text = format_percent(return_5d * 100) if return_5d is not None else NA_TEXT
-
         lines.extend(
             [
                 f"{index}) {snapshot.get('name')}({snapshot.get('symbol')})",
@@ -715,53 +727,51 @@ def _format_static_section(prepared_snapshots: list[dict]) -> list[str]:
         if short_diag.get("note"):
             lines.append(f"- 공매도 메모: {short_diag.get('note')}")
         lines.append("")
-
     if prepared_snapshots:
         lines.append("- 일부 수급/밸류/피처 데이터는 가격 기준일과 다를 수 있음")
     return lines
 
 
-def _build_report_bundle(reader: SupabaseReader, report_type: str) -> dict:
-    macro = reader.fetch_latest_global_macro_snapshot()
-    report_base_date = macro.get("base_date")
-    price_diagnostics = reader.fetch_price_diagnostics(report_base_date=report_base_date, lookback_days=7)
-    selected_price_date = (price_diagnostics.get("selected") or {}).get("base_date") or price_diagnostics.get("latest_normalized", {}).get("base_date")
-    return {
-        "readiness": reader.fetch_report_readiness(),
-        "macro": macro,
-        "breadth": reader.fetch_latest_market_breadth(),
-        "derivatives": reader.fetch_latest_derivatives_snapshot(),
-        "price_diagnostics": price_diagnostics,
-        "selected_price_date": selected_price_date,
-        "top_volume": reader.fetch_top_volume_stocks_by_market(limit=5, price_base_date=selected_price_date),
-        "static_snapshots": reader.fetch_static_universe_stock_snapshot(price_base_date=selected_price_date),
-    }
+def _build_data_status_summary(readiness: dict, ranking_bundle: dict, diagnostics: dict) -> list[str]:
+    ranking_diag = ranking_bundle.get("diagnostics") or {}
+    lines = [
+        "## 데이터 상태 요약",
+        f"- 랭킹 기준일: {format_date(ranking_bundle.get('ranking_base_date'))}",
+        f"- 가격 기준일: {format_date(ranking_bundle.get('price_base_date'))}",
+        f"- 랭킹 상태: {readiness.get('ranking_status')}",
+        f"- 가격 상태: {readiness.get('price_status')}",
+        f"- watchlist price hit ratio: {readiness.get('watchlist_price_hit_ratio', 0):.1%}",
+        f"- market mismatch rows: {len(ranking_diag.get('market_mismatch_rows', []))}",
+        f"- q-prefix rows: {len(ranking_diag.get('q_prefix_rows', []))}",
+    ]
+    if ranking_bundle.get("fallback_applied_sections"):
+        lines.append(f"- fallback 적용 섹션: {', '.join(ranking_bundle.get('fallback_applied_sections', []))}")
+    if diagnostics["watchlist_missing_prices"]:
+        lines.append(f"- 가격 누락 관심종목: {len(diagnostics['watchlist_missing_prices'])}개")
+    return lines
 
 
-def _build_morning_report(
-    bundle: dict,
-    now_kst: datetime.datetime,
-    analyzer: GeminiAnalyzer | None,
-    news_text: str,
-    prepared_snapshots: list[dict],
-    diagnostics: dict,
-    event_map: dict,
-    gemini_tracker: dict,
-) -> str:
+def _collect_ranking_event_map(reader: SupabaseReader, ranking_bundle: dict) -> dict:
+    symbols = []
+    for rank_type_map in (ranking_bundle.get("sections") or {}).values():
+        for rows in rank_type_map.values():
+            for row in rows:
+                symbols.append(canonicalize_symbol(row.get("symbol")))
+    return reader.fetch_latest_stock_events(list(dict.fromkeys(symbols))) if symbols else {}
+
+
+def _build_morning_report(bundle: dict, now_kst: datetime.datetime, analyzer: GeminiAnalyzer | None, news_text: str, prepared_snapshots: list[dict], diagnostics: dict, event_map: dict, gemini_tracker: dict) -> str:
     macro = bundle["macro"]
     breadth = bundle["breadth"]
-    derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
-    price_diagnostics = bundle["price_diagnostics"]
-    top_volume = bundle["top_volume"]
+    ranking_bundle = bundle["ranking_bundle"]
     positives, burdens, watchpoints = _build_market_impact_lists(macro)
     naver_service = NaverNewsService()
-
-    lines = _build_header_lines("Morning Market Brief", now_kst, readiness, price_diagnostics, diagnostics)
+    lines = _build_header_lines("Morning Market Brief", now_kst, readiness, ranking_bundle, diagnostics)
     lines.extend(
         [
             "",
-            "## 미국 시장 정리",
+            "## 미국시장/매크로",
             f"- {label_for_column('sp500')}: {format_index(macro.get('sp500'))} ({format_percent(macro.get('sp500_change_rate'))})",
             f"- {label_for_column('nasdaq')}: {format_index(macro.get('nasdaq'))} ({format_percent(macro.get('nasdaq_change_rate'))})",
             f"- SOX: {format_index(macro.get('sox'))}",
@@ -772,132 +782,96 @@ def _build_morning_report(
         ]
     )
     lines.extend(_generate_us_market_summary(macro, news_text, analyzer, gemini_tracker))
-    lines.extend(["", "## 한국 시장 영향 전망", "- 긍정 요인:"])
+    lines.extend(["", "## 한국시장 예상 영향", "- 긍정 요인:"])
     lines.extend([f"  - {item}" for item in positives])
     lines.append("- 부담 요인:")
     lines.extend([f"  - {item}" for item in burdens])
     lines.append("- 오늘 관전 포인트:")
     lines.extend([f"  - {item}" for item in watchpoints])
-    lines.extend(
-        [
-            "",
-            "## 전일 한국 시장 요약",
-            f"- KOSPI: {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))})",
-            f"- KOSDAQ: {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))})",
-            f"- KOSPI 수급: 개인 {_format_market_flow(macro.get('kospi_individual_net_buy'))}, 외국인 {_format_market_flow(macro.get('kospi_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kospi_institutional_net_buy'))}",
-            f"- KOSDAQ 수급: 개인 {_format_market_flow(macro.get('kosdaq_individual_net_buy'))}, 외국인 {_format_market_flow(macro.get('kosdaq_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kosdaq_institutional_net_buy'))}",
-            f"- 상승/하락/보합: 상승 {breadth.get('advances', NA_TEXT)}개 / 하락 {breadth.get('declines', NA_TEXT)}개 / 보합 {breadth.get('unchanged', NA_TEXT)}개",
-            f"- {label_for_column('kospi200_futures')}: {format_index(derivatives.get('kospi200_futures'))}",
-            "",
-        ]
-    )
-    lines.extend(_format_top_volume_sections(top_volume, price_diagnostics, naver_service, analyzer, news_text, event_map, gemini_tracker))
     lines.append("")
-    lines.extend(_format_static_section(prepared_snapshots))
+    lines.extend(_format_watchlist_section(prepared_snapshots))
+    lines.append("")
+    lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+    lines.append("")
+    lines.extend(_build_data_status_summary(readiness, ranking_bundle, diagnostics))
     return _clean_report_text("\n".join(lines))
 
 
-def _build_regular_report(
-    bundle: dict,
-    now_kst: datetime.datetime,
-    analyzer: GeminiAnalyzer | None,
-    news_text: str,
-    prepared_snapshots: list[dict],
-    diagnostics: dict,
-    event_map: dict,
-    gemini_tracker: dict,
-) -> str:
+def _build_regular_report(bundle: dict, now_kst: datetime.datetime, analyzer: GeminiAnalyzer | None, news_text: str, prepared_snapshots: list[dict], diagnostics: dict, event_map: dict, gemini_tracker: dict) -> str:
     macro = bundle["macro"]
     breadth = bundle["breadth"]
     derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
-    price_diagnostics = bundle["price_diagnostics"]
-    top_volume = bundle["top_volume"]
+    ranking_bundle = bundle["ranking_bundle"]
     naver_service = NaverNewsService()
-    judgment = _infer_market_judgment(macro, breadth, readiness)
-
-    lines = _build_header_lines(f"Intraday Market Brief | {_get_regular_slot_label(now_kst)}", now_kst, readiness, price_diagnostics, diagnostics)
+    judgment = _infer_market_judgment(macro, breadth)
+    lines = _build_header_lines(f"Intraday Market Brief | {_get_regular_slot_label(now_kst)}", now_kst, readiness, ranking_bundle, diagnostics)
     lines.extend(
         [
             "",
-            "## 1. 장중 매크로 점검",
+            "## 장중 지수/매크로 변화",
             f"- 원/달러: {format_usdkrw(macro.get('usdkrw'))}",
             f"- DXY: {format_plain_number(macro.get('dxy'))}",
             f"- 미국 10년물 / 한국 10년물: {format_rate_percent(macro.get('us10y'))} / {format_rate_percent(macro.get('kr10y'))}",
-            f"- WTI / Brent / Gold / Copper: {format_plain_number(macro.get('wti'))} / {format_plain_number(macro.get('brent'))} / {format_plain_number(macro.get('gold'))} / {format_plain_number(macro.get('copper'))}",
-            f"- {label_for_column('kospi200_futures')}: {format_index(derivatives.get('kospi200_futures'))}",
-            "",
-            "## 2. 지수 흐름 점검",
             f"- KOSPI: {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))})",
             f"- KOSDAQ: {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))})",
-            f"- S&P500 / NASDAQ: {format_index(macro.get('sp500'))} ({format_percent(macro.get('sp500_change_rate'))}) / {format_index(macro.get('nasdaq'))} ({format_percent(macro.get('nasdaq_change_rate'))})",
+            f"- {label_for_column('kospi200_futures')}: {format_index(derivatives.get('kospi200_futures'))}",
             f"- 시장 폭: 상승 {breadth.get('advances', NA_TEXT)}개 / 하락 {breadth.get('declines', NA_TEXT)}개 / 보합 {breadth.get('unchanged', NA_TEXT)}개",
             f"- 시장 판단: {judgment}",
             "",
         ]
     )
-    lines.extend(_format_top_volume_sections(top_volume, price_diagnostics, naver_service, analyzer, news_text, event_map, gemini_tracker))
+    lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
     lines.append("")
-    lines.extend(["## 4. Static 관심종목 점검"])
-    lines.extend(_format_static_section(prepared_snapshots)[1:])
-    lines.extend(["", "## 5. 요약 판단", f"- 종합 판단: {judgment}"])
+    lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+    lines.append("")
+    lines.extend(_format_watchlist_section(prepared_snapshots, title="## 관심종목 변동"))
+    lines.append("")
+    lines.extend(_build_data_status_summary(readiness, ranking_bundle, diagnostics))
     return _clean_report_text("\n".join(lines))
 
 
-def _build_closing_report(
-    bundle: dict,
-    now_kst: datetime.datetime,
-    analyzer: GeminiAnalyzer | None,
-    news_text: str,
-    prepared_snapshots: list[dict],
-    diagnostics: dict,
-    event_map: dict,
-    gemini_tracker: dict,
-) -> str:
+def _build_closing_report(bundle: dict, now_kst: datetime.datetime, analyzer: GeminiAnalyzer | None, news_text: str, prepared_snapshots: list[dict], diagnostics: dict, event_map: dict, gemini_tracker: dict) -> str:
     macro = bundle["macro"]
     breadth = bundle["breadth"]
     derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
-    price_diagnostics = bundle["price_diagnostics"]
-    top_volume = bundle["top_volume"]
+    ranking_bundle = bundle["ranking_bundle"]
     naver_service = NaverNewsService()
-    judgment = _infer_market_judgment(macro, breadth, readiness)
-
-    lines = _build_header_lines("Closing Market Brief", now_kst, readiness, price_diagnostics, diagnostics)
+    judgment = _infer_market_judgment(macro, breadth)
+    lines = _build_header_lines("Closing Market Brief", now_kst, readiness, ranking_bundle, diagnostics)
     lines.extend(
         [
             "",
-            "## 1. 마감 지수와 수급",
+            "## 마감 지수/매크로",
             f"- KOSPI 마감: {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))})",
             f"- KOSDAQ 마감: {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))})",
-            f"- 시장 수급 (market_supply_date: {format_date(macro.get('base_date'))}): 개인 {_format_market_flow(macro.get('kospi_individual_net_buy'))}, 외국인 {_format_market_flow(macro.get('kospi_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kospi_institutional_net_buy'))}",
+            f"- 시장 수급: 개인 {_format_market_flow(macro.get('kospi_individual_net_buy'))}, 외국인 {_format_market_flow(macro.get('kospi_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kospi_institutional_net_buy'))}",
             f"- KOSDAQ 수급: 개인 {_format_market_flow(macro.get('kosdaq_individual_net_buy'))}, 외국인 {_format_market_flow(macro.get('kosdaq_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kosdaq_institutional_net_buy'))}",
-            f"- 시장 폭: 상승 {breadth.get('advances', NA_TEXT)}개 / 하락 {breadth.get('declines', NA_TEXT)}개 / 보합 {breadth.get('unchanged', NA_TEXT)}개",
-            "",
-            "## 2. 마감 매크로·파생 체크",
             f"- 원/달러: {format_usdkrw(macro.get('usdkrw'))}",
             f"- 미국 10년물 / 한국 10년물: {format_rate_percent(macro.get('us10y'))} / {format_rate_percent(macro.get('kr10y'))}",
             f"- DXY / VIX / SOX: {format_plain_number(macro.get('dxy'))} / {format_plain_number(macro.get('vix'))} / {format_index(macro.get('sox'))}",
             f"- {label_for_column('kospi200_futures')}: {format_index(derivatives.get('kospi200_futures'))}",
-            "",
-            f"## 3. 거래량 상위 종목 테마{' - 커버리지 부족으로 참고용' if readiness.get('coverage_status') == 'PARTIAL' else ''}",
             f"- 마감 판단: {judgment}",
             "",
         ]
     )
-    lines.extend(_format_top_volume_sections(top_volume, price_diagnostics, naver_service, analyzer, news_text, event_map, gemini_tracker)[2:])
+    lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
     lines.append("")
-    lines.extend(["## 4. Static 관심종목 종가/수급/퀀트/밸류"])
-    lines.extend(_format_static_section(prepared_snapshots)[1:])
+    lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+    lines.append("")
+    lines.extend(_format_watchlist_section(prepared_snapshots, title="## 관심종목 종가/수급/공매도/밸류 점검"))
     lines.extend(
         [
             "",
-            "## 5. 다음 거래일 체크포인트",
+            "## 다음 거래일 체크포인트",
             "- 환율과 미국 증시 마감 방향이 국내 위험선호를 유지시키는지 확인",
-            "- 외국인 수급이 가격 흐름과 동행하는지, 특히 가격과 역행하는지 점검",
-            "- 거래량 상위 종목이 단기 순환매인지, 특정 테마 확산인지 구분해 추격 여부를 결정",
+            "- 거래량/거래대금 상위 종목이 단기 순환매인지, 특정 테마 확산인지 구분",
+            "- 관심종목의 가격 흐름과 외국인 수급이 동행하는지 점검",
+            "",
         ]
     )
+    lines.extend(_build_data_status_summary(readiness, ranking_bundle, diagnostics))
     return _clean_report_text("\n".join(lines))
 
 
@@ -910,25 +884,20 @@ def _save_report(report_type: str, report_content: str, now_kst: datetime.dateti
     return file_path
 
 
-def run_report(report_type: str, now_kst: datetime.datetime):
+def run_report(report_type: str, now_kst: datetime.datetime, send_enabled: bool = True):
     reader = SupabaseReader()
     analyzer = _safe_get_analyzer()
     logger.info("Supabase official tables bundle loading...")
-    bundle = _build_report_bundle(reader, report_type)
+    bundle = _build_reader_bundle(reader, report_type)
     logger.info("Google Docs news loading...")
     news_text = reader.prepare_news_context(reader.fetch_news_document())
 
-    prepared_snapshots, diagnostics = _prepare_static_snapshots(bundle["static_snapshots"])
-    top_volume_symbols = []
-    for key in ("KOSPI", "KOSDAQ", "ETF_ETN"):
-        for row in bundle["top_volume"].get(key) or []:
-            top_volume_symbols.append(canonicalize_symbol(row.get("symbol")))
-    event_map = reader.fetch_latest_stock_events(list(dict.fromkeys(top_volume_symbols))) if top_volume_symbols else {}
+    prepared_snapshots, diagnostics = _prepare_watchlist_snapshots(bundle["watchlist_bundle"]["snapshots"])
+    event_map = _collect_ranking_event_map(reader, bundle["ranking_bundle"])
     gemini_tracker = {"count": 0, "purposes": []}
 
-    _log_price_diagnostics(bundle["price_diagnostics"], bundle["top_volume"], prepared_snapshots, gemini_tracker)
-    stockdata_fix_text = _build_stockdata_fix_text(bundle["price_diagnostics"], bundle["top_volume"], prepared_snapshots, diagnostics)
-    logger.warning("StockData 전달용 수정 명령어:\n%s", stockdata_fix_text)
+    _log_report_diagnostics(bundle, prepared_snapshots, gemini_tracker)
+    logger.warning("StockData 전달용 수정 명령어:\n%s", _build_stockdata_fix_text(bundle, diagnostics))
 
     if report_type == "morning":
         report_content = _build_morning_report(bundle, now_kst, analyzer, news_text, prepared_snapshots, diagnostics, event_map, gemini_tracker)
@@ -939,6 +908,11 @@ def run_report(report_type: str, now_kst: datetime.datetime):
 
     _save_report(report_type, report_content, now_kst)
     logger.info("Gemini call count and purpose=%s / %s", gemini_tracker["count"], gemini_tracker["purposes"])
+
+    if not send_enabled:
+        logger.info("Dry-run or no-send mode enabled. Telegram sending skipped.")
+        return
+
     try:
         sender = TelegramSender()
         sender.send_report(report_content)
@@ -949,8 +923,9 @@ def run_report(report_type: str, now_kst: datetime.datetime):
 def main():
     args = _parse_args()
     now_kst = _get_now_kst()
-    logger.info("=== Daily Report Pipeline start [type=%s] ===", args.report_type)
-    run_report(args.report_type, now_kst)
+    send_enabled = not (args.dry_run or args.no_send)
+    logger.info("=== Daily Report Pipeline start [type=%s dry_run=%s] ===", args.report_type, not send_enabled)
+    run_report(args.report_type, now_kst, send_enabled=send_enabled)
 
 
 if __name__ == "__main__":

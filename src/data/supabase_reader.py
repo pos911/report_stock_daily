@@ -18,7 +18,9 @@ from src.utils.market_assets import (
     infer_asset_type,
     is_common_stock_top_eligible,
     is_etf_etn_top_eligible,
+    is_allowed_ranking_source,
     normalize_market_label,
+    ranking_market_matches_master,
 )
 
 # NEWS constants moved into class or kept global
@@ -1076,11 +1078,12 @@ class SupabaseReader:
     def fetch_stock_feature_pivot(self, symbols, feature_names):
         if not symbols or not feature_names:
             return {}
+        expanded_symbols = self._expand_symbol_aliases(symbols)
         try:
             response = (
                 self.client.table("feature_store_daily")
                 .select("symbol, base_date, feature_name, feature_value, available_at")
-                .in_("symbol", symbols)
+                .in_("symbol", expanded_symbols)
                 .in_("feature_name", feature_names)
                 .order("base_date", desc=True)
                 .limit(20000)
@@ -1170,6 +1173,368 @@ class SupabaseReader:
         except Exception as exc:
             print(f"[WARNING] fetch_latest_base_date_and_count({table_name}) failed: {exc}")
         return {"base_date": latest_date, "row_count": row_count}
+
+    def get_latest_valid_price_date(self, report_date: str | None = None, lookback_days: int = 7):
+        candidates = self.fetch_price_date_candidates(report_date, lookback_days=lookback_days)
+        best = None
+        for base_date in candidates:
+            rows = self.fetch_price_rows_by_date(base_date)
+            valid_rows = 0
+            for row in rows:
+                if has_minimum_top_data(row):
+                    valid_rows += 1
+            candidate = {"base_date": base_date, "valid_rows": valid_rows, "total_rows": len(rows)}
+            if best is None or (candidate["valid_rows"], candidate["base_date"]) > (best["valid_rows"], best["base_date"]):
+                best = candidate
+        return best or {"base_date": None, "valid_rows": 0, "total_rows": 0}
+
+    @staticmethod
+    def _normalize_price_row_fields(row: dict) -> dict:
+        normalized = dict(row or {})
+        field_map = {
+            "stck_oprc": "open_price",
+            "stck_hgpr": "high_price",
+            "stck_lwpr": "low_price",
+            "stck_clpr": "close_price",
+            "acml_vol": "volume",
+            "acml_tr_pbmn": "trading_value",
+            "close": "close_price",
+            "amount": "trading_value",
+            "open": "open_price",
+            "high": "high_price",
+            "low": "low_price",
+        }
+        for source_field, target_field in field_map.items():
+            if target_field not in normalized or normalized.get(target_field) in (None, "", "-"):
+                if source_field in normalized:
+                    normalized[target_field] = normalized.get(source_field)
+        return normalized
+
+    def _build_price_map_for_date(self, base_date: str | None) -> tuple[dict, dict]:
+        if not base_date:
+            return {}, {"base_date": None, "row_count": 0, "valid_rows": 0}
+        rows = [self._normalize_price_row_fields(row) for row in self.fetch_price_rows_by_date(base_date)]
+        price_map = {}
+        valid_rows = 0
+        for row in rows:
+            canonical = canonicalize_symbol(row.get("symbol"))
+            if not canonical:
+                continue
+            row = {**row, "symbol": canonical}
+            if canonical not in price_map:
+                price_map[canonical] = row
+            if has_minimum_top_data(row):
+                valid_rows += 1
+        return price_map, {"base_date": base_date, "row_count": len(rows), "valid_rows": valid_rows}
+
+    def _fetch_market_ranking_rows_for_dates(self, candidate_dates: list[str]) -> list[dict]:
+        if not candidate_dates:
+            return []
+        try:
+            response = (
+                self.client.table("normalized_market_rankings_daily")
+                .select("*")
+                .in_("base_date", candidate_dates)
+                .limit(20000)
+                .execute()
+            )
+            return response.data or []
+        except Exception as exc:
+            print(f"[WARNING] _fetch_market_ranking_rows_for_dates failed: {exc}")
+            return []
+
+    def _candidate_ranking_dates(self, report_date: str | None = None, lookback_days: int = 7) -> list[str]:
+        candidates = []
+        try:
+            query = self.client.table("normalized_market_rankings_daily").select("base_date").order("base_date", desc=True).limit(max(lookback_days * 4, 20))
+            if report_date:
+                query = query.lte("base_date", report_date)
+            response = query.execute()
+            for row in response.data or []:
+                base_date = str(row.get("base_date"))
+                if base_date and base_date not in candidates:
+                    candidates.append(base_date)
+        except Exception as exc:
+            print(f"[WARNING] _candidate_ranking_dates failed: {exc}")
+        return candidates[: max(lookback_days, 5)]
+
+    def _enrich_ranking_rows(self, rows: list[dict], price_map: dict, master_map: dict) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+        enriched = []
+        market_mismatches = []
+        q_prefix_rows = []
+        legacy_source_rows = []
+
+        for row in rows or []:
+            raw_symbol = row.get("symbol")
+            canonical = canonicalize_symbol(raw_symbol)
+            master = master_map.get(canonical, {})
+            ranking_market = normalize_market_label(row.get("market"))
+            master_market = normalize_market_label(master.get("market"))
+            rank_type = (row.get("rank_type") or "").strip().lower()
+            source = row.get("source")
+
+            if raw_symbol and str(raw_symbol).strip().upper().startswith("Q") and canonical:
+                q_prefix_rows.append(
+                    {
+                        "symbol": raw_symbol,
+                        "canonical_symbol": canonical,
+                        "base_date": row.get("base_date"),
+                        "market": ranking_market,
+                        "rank_type": rank_type,
+                    }
+                )
+
+            if not is_allowed_ranking_source(rank_type, source):
+                legacy_source_rows.append(
+                    {
+                        "symbol": canonical,
+                        "base_date": row.get("base_date"),
+                        "market": ranking_market,
+                        "rank_type": rank_type,
+                        "source": source,
+                    }
+                )
+                continue
+
+            if ranking_market and master_market and not ranking_market_matches_master(ranking_market, master_market):
+                market_mismatches.append(
+                    {
+                        "symbol": canonical,
+                        "base_date": row.get("base_date"),
+                        "ranking_market": ranking_market,
+                        "master_market": master_market,
+                        "rank_type": rank_type,
+                        "source": source,
+                    }
+                )
+                continue
+
+            price_row = price_map.get(canonical, {})
+            enriched.append(
+                {
+                    **row,
+                    **{key: value for key, value in price_row.items() if key not in {"symbol", "base_date"}},
+                    "symbol": canonical,
+                    "display_symbol": canonical,
+                    "canonical_symbol": canonical,
+                    "name": row.get("name") or master.get("name") or canonical,
+                    "market": ranking_market or master_market,
+                    "master_market": master_market,
+                    "asset_type": infer_asset_type(row.get("name") or master.get("name"), ranking_market or master_market, canonical),
+                    "rank_type": rank_type,
+                    "source": source,
+                    "ranking_base_date": row.get("base_date"),
+                    "price_base_date": price_row.get("base_date"),
+                }
+            )
+
+        return enriched, market_mismatches, q_prefix_rows, legacy_source_rows
+
+    def _build_price_fallback_rankings(self, price_base_date: str | None, limit: int = 10):
+        sections = {
+            "volume": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+            "trading_value": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+            "market_cap": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+        }
+        if not price_base_date:
+            return sections
+
+        master_map = self.fetch_stocks_master_map()
+        rows = [self._normalize_price_row_fields(row) for row in self.fetch_price_rows_by_date(price_base_date)]
+        enriched_rows = []
+        for row in rows:
+            canonical = canonicalize_symbol(row.get("symbol"))
+            master = master_map.get(canonical, {})
+            market = normalize_market_label(master.get("market"))
+            name = master.get("name") or canonical
+            asset_type = infer_asset_type(name, market, canonical)
+            if not canonical or not market:
+                continue
+            enriched_rows.append(
+                {
+                    **row,
+                    "symbol": canonical,
+                    "display_symbol": canonical,
+                    "canonical_symbol": canonical,
+                    "name": name,
+                    "market": market,
+                    "asset_type": asset_type,
+                    "ranking_base_date": price_base_date,
+                    "price_base_date": price_base_date,
+                    "source": "VALID_PRICE_FALLBACK",
+                }
+            )
+
+        market_groups = {
+            "KOSPI": [row for row in enriched_rows if row.get("market") == "KOSPI" and is_common_stock_top_eligible(row)],
+            "KOSDAQ": [row for row in enriched_rows if row.get("market") == "KOSDAQ" and is_common_stock_top_eligible(row)],
+            "ETF": [row for row in enriched_rows if row.get("asset_type") == "ETF"],
+            "ETN": [row for row in enriched_rows if row.get("asset_type") == "ETN"],
+        }
+
+        for market, items in market_groups.items():
+            volume_sorted = sorted(
+                [row for row in items if has_minimum_top_data(row)],
+                key=lambda item: (-float(item.get("volume") or 0), -float(item.get("trading_value") or 0)),
+            )
+            trading_sorted = sorted(
+                [row for row in items if has_minimum_top_data(row)],
+                key=lambda item: (-float(item.get("trading_value") or 0), -float(item.get("volume") or 0)),
+            )
+            market_cap_sorted = sorted(
+                [row for row in items if row.get("market_cap") not in (None, "")],
+                key=lambda item: -float(item.get("market_cap") or 0),
+            )
+
+            sections["volume"][market] = [
+                {**row, "rank_type": "volume", "rank": index + 1}
+                for index, row in enumerate(volume_sorted[:limit])
+            ]
+            sections["trading_value"][market] = [
+                {**row, "rank_type": "trading_value", "rank": index + 1}
+                for index, row in enumerate(trading_sorted[:limit])
+            ]
+            sections["market_cap"][market] = [
+                {**row, "rank_type": "market_cap", "rank": index + 1}
+                for index, row in enumerate(market_cap_sorted[:limit])
+            ]
+        return sections
+
+    def get_latest_market_rankings(self, report_date: str | None = None, limit: int = 10):
+        candidate_dates = self._candidate_ranking_dates(report_date, lookback_days=7)
+        latest_valid_price = self.get_latest_valid_price_date(report_date, lookback_days=7)
+        price_base_date = latest_valid_price.get("base_date")
+        price_map, price_meta = self._build_price_map_for_date(price_base_date)
+        master_map = self.fetch_stocks_master_map()
+        ranking_rows = self._fetch_market_ranking_rows_for_dates(candidate_dates)
+        sections_template = {
+            "volume": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+            "trading_value": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+            "market_cap": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+        }
+
+        per_date_rows = {}
+        for row in ranking_rows:
+            base_date = str(row.get("base_date"))
+            per_date_rows.setdefault(base_date, []).append(row)
+
+        selected_date = None
+        fallback_used = False
+        selected_sections = sections_template
+        selected_diagnostics = {
+            "market_mismatch_rows": [],
+            "q_prefix_rows": [],
+            "legacy_source_rows": [],
+            "candidate_dates": candidate_dates,
+            "ranking_counts": {},
+        }
+
+        required_markets = {"KOSPI", "KOSDAQ"}
+        for index, base_date in enumerate(candidate_dates):
+            rows = per_date_rows.get(base_date, [])
+            enriched, market_mismatches, q_prefix_rows, legacy_source_rows = self._enrich_ranking_rows(rows, price_map, master_map)
+            sections = {
+                "volume": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+                "trading_value": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+                "market_cap": {"KOSPI": [], "KOSDAQ": [], "ETF": [], "ETN": []},
+            }
+            for row in enriched:
+                rank_type = row.get("rank_type")
+                market = normalize_market_label(row.get("market"))
+                if rank_type in sections and market in sections[rank_type]:
+                    sections[rank_type][market].append(row)
+
+            for rank_type in sections:
+                for market in sections[rank_type]:
+                    sections[rank_type][market] = sorted(
+                        sections[rank_type][market],
+                        key=lambda item: (
+                            float(item.get("rank") or 999999),
+                            -float(item.get("trading_value") or 0),
+                            -float(item.get("volume") or 0),
+                        ),
+                    )[:limit]
+
+            ranking_counts = {
+                f"{rank_type}:{market}": len(rows_)
+                for rank_type, market_map in sections.items()
+                for market, rows_ in market_map.items()
+            }
+            has_required_volume = all(sections["volume"].get(market) for market in required_markets)
+            selected_date = base_date
+            selected_sections = sections
+            selected_diagnostics = {
+                "market_mismatch_rows": market_mismatches,
+                "q_prefix_rows": q_prefix_rows,
+                "legacy_source_rows": legacy_source_rows,
+                "candidate_dates": candidate_dates,
+                "ranking_counts": ranking_counts,
+            }
+            fallback_used = bool(report_date and base_date != str(report_date)) or index > 0
+            if has_required_volume:
+                break
+
+        price_fallback_sections = self._build_price_fallback_rankings(price_base_date, limit=limit)
+        fallback_applied_sections = []
+        for rank_type, market_map in selected_sections.items():
+            for market, rows in market_map.items():
+                if rows:
+                    continue
+                fallback_rows = price_fallback_sections.get(rank_type, {}).get(market, [])
+                if fallback_rows:
+                    selected_sections[rank_type][market] = fallback_rows
+                    fallback_applied_sections.append(f"{rank_type}:{market}")
+
+        if fallback_applied_sections:
+            fallback_used = True
+
+        ranking_status = "정상"
+        if not selected_date:
+            ranking_status = "부족"
+        elif fallback_used or selected_diagnostics["legacy_source_rows"] or fallback_applied_sections:
+            ranking_status = "일부 fallback"
+        if selected_diagnostics["market_mismatch_rows"] or selected_diagnostics["q_prefix_rows"]:
+            ranking_status = "부족"
+
+        return {
+            "ranking_base_date": selected_date,
+            "price_base_date": price_meta.get("base_date"),
+            "latest_valid_price_date": price_meta.get("base_date"),
+            "fallback_used": fallback_used,
+            "sections": selected_sections,
+            "diagnostics": selected_diagnostics,
+            "ranking_status": ranking_status,
+            "price_meta": price_meta,
+            "fallback_applied_sections": fallback_applied_sections,
+        }
+
+    def get_ranking_based_universe(self, report_date: str | None = None, limit: int = 10):
+        ranking_bundle = self.get_latest_market_rankings(report_date=report_date, limit=limit)
+        rows = []
+        for rank_type, market_map in (ranking_bundle.get("sections") or {}).items():
+            for market, items in market_map.items():
+                for item in items:
+                    rows.append(
+                        {
+                            **item,
+                            "source_category": "ranking",
+                            "ranking_market": market,
+                            "rank_type": rank_type,
+                        }
+                    )
+        return rows
+
+    def get_watchlist_snapshots(self, report_date: str | None = None):
+        latest_valid_price = self.get_latest_valid_price_date(report_date, lookback_days=7)
+        snapshots = self.fetch_static_universe_stock_snapshot(price_base_date=latest_valid_price.get("base_date"))
+        for snapshot in snapshots:
+            snapshot["source_category"] = "watchlist"
+            snapshot["selected_price_base_date"] = latest_valid_price.get("base_date")
+        return {
+            "price_base_date": latest_valid_price.get("base_date"),
+            "snapshots": snapshots,
+            "price_meta": latest_valid_price,
+        }
 
     def fetch_price_rows_by_date(self, base_date: str):
         if not base_date:
@@ -1585,10 +1950,26 @@ class SupabaseReader:
     def fetch_report_readiness(self):
         latest_price_date = self._get_latest_base_date("normalized_stock_prices_daily")
         latest_macro_date = self._get_latest_base_date("normalized_global_macro_daily")
+        latest_valid_price = self.get_latest_valid_price_date(latest_macro_date, lookback_days=7)
+        watchlist_bundle = self.get_watchlist_snapshots(report_date=latest_macro_date)
+        ranking_bundle = self.get_latest_market_rankings(report_date=latest_macro_date, limit=10)
         static_universe = self.fetch_static_stock_universe()
         static_enabled_count = len(static_universe)
-        full_market = self.fetch_full_market_top_volume_stocks(limit=5)
+
+        watchlist_snapshots = watchlist_bundle.get("snapshots") or []
+        watchlist_hits = 0
+        for snapshot in watchlist_snapshots:
+            price = snapshot.get("price") or {}
+            if price.get("close_price") not in (None, ""):
+                watchlist_hits += 1
+        watchlist_hit_ratio = (watchlist_hits / len(watchlist_snapshots)) if watchlist_snapshots else 0.0
+
+        full_market = self.fetch_full_market_top_volume_stocks(limit=5, price_base_date=latest_valid_price.get("base_date"))
         coverage = full_market.get("coverage") or {}
+        ranking_sections = ranking_bundle.get("sections") or {}
+        ranking_diag = ranking_bundle.get("diagnostics") or {}
+        ranking_ready = bool(ranking_sections.get("volume", {}).get("KOSPI")) and bool(ranking_sections.get("volume", {}).get("KOSDAQ")) and not ranking_diag.get("market_mismatch_rows") and not ranking_diag.get("q_prefix_rows")
+        watchlist_ready = watchlist_hit_ratio >= 0.5
 
         recent_logs = []
         try:
@@ -1630,30 +2011,49 @@ class SupabaseReader:
         covered_symbols = coverage.get("covered_symbols") or 0
         minimum_report_ready = (
             bool(latest_macro_date)
-            and bool(latest_price_date)
+            and bool(latest_valid_price.get("base_date"))
             and static_enabled_count > 0
-            and covered_symbols > 0
+            and watchlist_hits > 0
+            and (
+                bool(ranking_sections.get("volume", {}).get("KOSPI"))
+                or bool(ranking_sections.get("volume", {}).get("KOSDAQ"))
+                or bool(ranking_sections.get("trading_value", {}).get("KOSPI"))
+                or bool(ranking_sections.get("trading_value", {}).get("KOSDAQ"))
+            )
         )
-        full_market_coverage_pass = (
-            covered_symbols > 2000
-            and latest_full_price_processed > 2000
-        )
-        if full_market_coverage_pass:
-            coverage_status = "FULL"
-        elif covered_symbols > 0:
-            coverage_status = "PARTIAL"
+        full_market_coverage_pass = covered_symbols > 0
+        if ranking_bundle.get("ranking_status") == "정상":
+            ranking_status = "정상"
+        elif ranking_bundle.get("ranking_status") == "일부 fallback":
+            ranking_status = "일부 fallback"
         else:
-            coverage_status = "LIMITED"
+            ranking_status = "부족"
+
+        if latest_valid_price.get("valid_rows", 0) > 0:
+            price_status = "정상"
+        elif latest_valid_price.get("base_date"):
+            price_status = "일부 fallback"
+        else:
+            price_status = "부족"
 
         return {
             "latest_price_date": latest_price_date,
             "latest_macro_date": latest_macro_date,
+            "latest_valid_price_date": latest_valid_price.get("base_date"),
             "minimum_report_ready": minimum_report_ready,
+            "ranking_ready": ranking_ready,
+            "watchlist_ready": watchlist_ready,
             "full_market_coverage_pass": full_market_coverage_pass,
-            "coverage_status": coverage_status,
+            "coverage_status": "REFERENCE_ONLY",
             "price_coverage": coverage,
             "static_enabled_count": static_enabled_count,
             "recent_pipeline_logs": recent_logs,
             "recent_problem_logs": recent_problem_logs,
             "latest_full_price_records_processed": latest_full_price_processed,
+            "ranking_base_date": ranking_bundle.get("ranking_base_date"),
+            "ranking_status": ranking_status,
+            "price_status": price_status,
+            "watchlist_price_hit_ratio": watchlist_hit_ratio,
+            "market_master_status": "정상" if not ranking_diag.get("market_mismatch_rows") else "점검 필요",
+            "ranking_diagnostics": ranking_diag,
         }

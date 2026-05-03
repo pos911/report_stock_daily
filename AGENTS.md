@@ -46,3 +46,16 @@ Environment-specific settings or those required for automated pipelines:
 - **Zero-Waste Prompting**: The LLM must NEVER output excuses about missing data. If data is absent, the model must silently skip it. Do not say "Data is not provided" or "결측치입니다".
 - **Morning Report Data Source Rule**: Morning Market Brief sections must use Supabase StockData official tables as the source of truth. Market, macro, price, supply, valuation, short-selling, event, and feature numbers must come only from the official Supabase tables, not from external market-price crawlers.
 - **All Report Data Source Rule**: `morning`, `regular`, and `closing` reports must use Supabase official tables only for numeric data, must use `static_stock_universe.enabled = true` for watchlist coverage, and must not read `config/target_stocks.json` or local hardcoded target lists.
+- **Top Ranking Source Rule**:
+    - 거래량 Top 기준은 `normalized_market_rankings_daily`의 `rank_type='volume'`를 우선 사용한다.
+    - 거래대금/시총 Top 기준은 `normalized_market_rankings_daily`의 `rank_type in ('trading_value', 'market_cap')`를 우선 사용한다.
+    - `source='KIS'`는 volume ranking에만 사용하고, trading_value/market_cap에서는 `KRX` 또는 `VALID_PRICE_FALLBACK`만 허용한다.
+- **Watchlist Source Rule**:
+    - 관심종목은 반드시 `static_stock_universe.enabled = true`를 기준으로 한다.
+    - `stocks_master.is_active`는 report watchlist 기준이 아니다.
+- **Master vs Price Rule**:
+    - `stocks_master`는 전체 시장 마스터이며 market/asset 분류 검증에 사용한다.
+    - `normalized_stock_prices_daily`는 가격 fallback 및 watchlist 가격 source로 사용하되, Top ranking의 1차 기준으로 직접 정렬하지 않는다.
+- **External Data Rule**:
+    - report는 KIS/네이버/기타 외부 시세 API로 숫자를 직접 조회하지 않는다.
+    - Naver API와 Google Docs는 뉴스·주목 사유 보강에만 사용한다.
