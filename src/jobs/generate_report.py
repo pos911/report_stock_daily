@@ -18,6 +18,7 @@ from src.utils.formatters import (
     NA_TEXT,
     format_date,
     format_flow_amount,
+    format_bp,
     format_index,
     format_market_cap,
     format_multiple,
@@ -26,8 +27,10 @@ from src.utils.formatters import (
     format_plain_number,
     format_price,
     format_rate_percent,
+    format_rate_level,
     format_ratio_metric,
     format_signed_multiple,
+    format_spread_bp,
     format_trading_value,
     format_usdkrw,
     format_volume,
@@ -46,6 +49,7 @@ logger = logging.getLogger(__name__)
 VALID_REPORT_TYPES = ("morning", "regular", "closing")
 KST = ZoneInfo("Asia/Seoul")
 STATIC_SAMPLE_SYMBOLS = {"005930", "000660", "058470", "071050", "278470"}
+SIGNAL_MODEL_VERSION = "v0.1_unbacktested"
 
 
 def _parse_args():
@@ -130,6 +134,56 @@ def _format_market_flow(value) -> str:
     if numeric == 0:
         return "0"
     return format_flow_amount(numeric)
+
+
+def _interpret_us_10y_3y_spread(us10y, us3y) -> dict | None:
+    us10y_value = _safe_float(us10y)
+    us3y_value = _safe_float(us3y)
+    if us10y_value is None or us3y_value is None:
+        return None
+
+    spread_bp = (us10y_value - us3y_value) * 100
+    if spread_bp >= 75:
+        regime = "steep_positive"
+        plain = "장기금리가 단기금리보다 꽤 높은 정상 곡선입니다."
+        market_implication = "경기 회복 기대 또는 장기 인플레이션·기간프리미엄이 반영될 가능성이 있습니다."
+        equity_implication = "금융주에는 우호적일 수 있지만 장기금리 급등이면 성장주 밸류에는 부담입니다."
+        watchpoint = "금리차만이 아니라 10년물 레벨, 달러, VIX, 주가지수 흐름을 함께 보아야 합니다."
+    elif spread_bp >= 25:
+        regime = "mildly_positive"
+        plain = "완만한 정상 곡선으로 경기침체 신호는 약한 편입니다."
+        market_implication = "다만 금리 레벨 자체가 높으면 위험자산에는 중립 또는 부담일 수 있습니다."
+        equity_implication = "성장주보다 실적과 현금흐름이 확인되는 종목 선호가 자연스럽습니다."
+        watchpoint = "금리차 자체보다 높은 절대 금리 수준과 달러 강도를 함께 확인해야 합니다."
+    elif spread_bp > -25:
+        regime = "flat"
+        plain = "단기와 장기 금리 차가 거의 없어 향후 금리 경로 기대가 엇갈리는 구간입니다."
+        market_implication = "방향성 확신이 낮아 방어주·배당주·저변동 전략이 상대적으로 편할 수 있습니다."
+        equity_implication = "방향성 베팅보다 실적 확인과 리스크 관리가 우선입니다."
+        watchpoint = "달러, VIX, 지수 추세와 함께 해석해야 의미가 커집니다."
+    elif spread_bp > -75:
+        regime = "mildly_inverted"
+        plain = "단기금리가 장기금리보다 높은 역전 구간입니다."
+        market_implication = "긴축 부담과 향후 경기 둔화 기대가 일부 반영됐을 가능성이 있습니다."
+        equity_implication = "경기민감주 추격은 신중하고 대형 퀄리티·현금흐름 중심 접근이 유리합니다."
+        watchpoint = "금리차만으로 침체를 단정하지 말고 달러, VIX, 실적 흐름과 함께 봐야 합니다."
+    else:
+        regime = "deeply_inverted"
+        plain = "강한 역전 구간으로 정책금리 인하 기대 또는 경기 우려가 크게 반영된 상태일 수 있습니다."
+        market_implication = "고위험 성장주보다 방어·현금흐름 중심 자산이 더 중요해질 수 있습니다."
+        equity_implication = "레버리지성 종목 추격보다 리스크 예산 관리가 우선입니다."
+        watchpoint = "절대 금리 수준, 달러, VIX와 같이 보지 않으면 해석이 과도해질 수 있습니다."
+
+    return {
+        "us10y": us10y_value,
+        "us3y": us3y_value,
+        "spread_bp": spread_bp,
+        "regime": regime,
+        "plain_korean_summary": plain,
+        "market_implication": market_implication,
+        "equity_implication": equity_implication,
+        "watchpoint": watchpoint,
+    }
 
 
 def _diagnose_supply_unit(snapshot: dict) -> dict:
@@ -284,6 +338,164 @@ def _build_quant_comment(snapshot: dict) -> str:
     return _truncate_text(". ".join(parts) + ".")
 
 
+def _build_ranking_signal_lookup(ranking_bundle: dict) -> dict:
+    lookup = {}
+    for rank_type, market_map in (ranking_bundle.get("sections") or {}).items():
+        for market, rows in market_map.items():
+            for row in rows:
+                symbol = canonicalize_symbol(row.get("symbol"))
+                if not symbol:
+                    continue
+                bucket = lookup.setdefault(symbol, {})
+                bucket[f"{rank_type}_rank"] = row.get("rank")
+                bucket[f"{rank_type}_market"] = market
+                bucket[f"{rank_type}_source"] = row.get("source")
+    return lookup
+
+
+def _score_watchlist_snapshot(snapshot: dict, ranking_lookup: dict, macro: dict) -> dict:
+    price = snapshot.get("price") or {}
+    supply = snapshot.get("supply") or {}
+    features = snapshot.get("features") or {}
+    fundamentals_diag = snapshot.get("fundamentals_diag") or {"display": {}}
+    short_diag = snapshot.get("short_diag") or {}
+    symbol = canonicalize_symbol(snapshot.get("symbol"))
+    ranking = ranking_lookup.get(symbol, {})
+
+    close_price = _safe_float(price.get("close_price"))
+    ma5 = _safe_float(features.get("moving_avg_5"))
+    ma20 = _safe_float(features.get("moving_avg_20"))
+    return_5d = _safe_float(features.get("return_5d"))
+    volatility = _safe_float(features.get("volatility_20d"))
+    foreign_z = _safe_float(features.get("foreign_flow_zscore"))
+    foreign_net = _safe_float(supply.get("foreign_net_buy"))
+    inst_net = _safe_float(supply.get("institutional_net_buy"))
+    short_ratio = _safe_float((snapshot.get("short_selling") or {}).get("short_ratio"))
+
+    price_score_raw = 0
+    price_components = 0
+    if return_5d is not None:
+        price_components += 1
+        price_score_raw += 1 if return_5d > 0 else -1 if return_5d < 0 else 0
+    if close_price is not None and ma20 is not None:
+        price_components += 1
+        price_score_raw += 1 if close_price >= ma20 else -1
+    if close_price is not None and ma5 is not None:
+        price_components += 1
+        price_score_raw += 1 if close_price >= ma5 else -1
+    price_momentum_score = max(-2, min(2, price_score_raw))
+
+    volume_score_raw = 0
+    volume_components = 0
+    for key in ("volume_rank", "trading_value_rank"):
+        rank = ranking.get(key)
+        if rank is not None:
+            volume_components += 1
+            volume_score_raw += 1 if int(rank) <= 5 else 0
+    volume_trading_score = max(-2, min(2, volume_score_raw))
+
+    supply_score_raw = 0
+    supply_components = 0
+    if foreign_z is not None:
+        supply_components += 1
+        supply_score_raw += 1 if foreign_z >= 1 else -1 if foreign_z <= -1 else 0
+    if foreign_net is not None:
+        supply_components += 1
+        supply_score_raw += 1 if foreign_net > 0 else -1 if foreign_net < 0 else 0
+    if inst_net is not None:
+        supply_components += 1
+        supply_score_raw += 1 if inst_net > 0 else -1 if inst_net < 0 else 0
+    supply_score = max(-2, min(2, supply_score_raw))
+
+    valuation_score_raw = 0
+    valuation_components = 0
+    if fundamentals_diag.get("display", {}).get("per") not in {NA_TEXT, "N/A(점검필요)"}:
+        valuation_components += 1
+        valuation_score_raw += 1
+    if fundamentals_diag.get("display", {}).get("pbr") not in {NA_TEXT, "N/A(점검필요)"}:
+        valuation_components += 1
+    valuation_score = max(-1, min(1, valuation_score_raw))
+
+    risk_score_raw = 0
+    risk_components = 0
+    if volatility is not None:
+        risk_components += 1
+        risk_score_raw += -2 if volatility >= 0.08 else -1 if volatility >= 0.05 else 0
+    if short_ratio is not None:
+        risk_components += 1
+        risk_score_raw += -1 if short_ratio >= 5 else 0
+    elif short_diag.get("needs_review"):
+        risk_components += 1
+        risk_score_raw += -1
+    risk_score = max(-2, min(0, risk_score_raw))
+
+    macro_fit_score_raw = 0
+    macro_components = 0
+    market = snapshot.get("market")
+    usdkrw = _safe_float(macro.get("usdkrw"))
+    us10y = _safe_float(macro.get("us10y"))
+    if market == "KOSPI" and usdkrw is not None:
+        macro_components += 1
+        macro_fit_score_raw += 1 if usdkrw < 1450 else 0
+    if market == "KOSDAQ" and us10y is not None and us10y >= 4.3:
+        macro_components += 1
+        macro_fit_score_raw -= 1
+    macro_fit_score = max(-1, min(1, macro_fit_score_raw))
+
+    total_signal_score = price_momentum_score + volume_trading_score + supply_score + valuation_score + risk_score + macro_fit_score
+    available_components = sum(
+        1 for count in (price_components, volume_components, supply_components, valuation_components, risk_components, macro_components) if count > 0
+    )
+    positive_components = sum(1 for score in (price_momentum_score, volume_trading_score, supply_score, valuation_score, macro_fit_score) if score > 0)
+    negative_components = sum(1 for score in (price_momentum_score, supply_score, risk_score, macro_fit_score) if score < 0)
+
+    if available_components >= 5 and abs(positive_components - negative_components) >= 2:
+        confidence = "high"
+    elif available_components >= 3:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    if available_components <= 1:
+        label = "판단 유보"
+    elif total_signal_score >= 4 and confidence != "low":
+        label = "비중확대 후보"
+    elif total_signal_score >= 1:
+        label = "보유/관찰"
+    elif total_signal_score <= -2:
+        label = "리스크 축소 후보"
+    else:
+        label = "관망"
+
+    strategy_parts = []
+    if volatility is not None and volatility >= 0.05:
+        strategy_parts.append("추격 진입보다 분할 접근")
+    if total_signal_score >= 4:
+        strategy_parts.append("거래량 유지 여부 확인 후 비중 확대 검토")
+    elif total_signal_score <= -2:
+        strategy_parts.append("손익보다 변동성 관리 우선")
+    else:
+        strategy_parts.append("확인 신호가 더 쌓일 때까지 관찰")
+    if foreign_z is not None and foreign_z < 0:
+        strategy_parts.append("외국인 수급 반전 여부 점검")
+    strategy_memo = _truncate_text(". ".join(dict.fromkeys(strategy_parts)) + ".")
+
+    return {
+        "price_momentum_score": price_momentum_score,
+        "volume_trading_score": volume_trading_score,
+        "supply_score": supply_score,
+        "valuation_score": valuation_score,
+        "risk_score": risk_score,
+        "macro_fit_score": macro_fit_score,
+        "total_signal_score": total_signal_score,
+        "confidence": confidence,
+        "label": label,
+        "strategy_memo": strategy_memo,
+        "signal_model_version": SIGNAL_MODEL_VERSION,
+        "ranking": ranking,
+    }
+
+
 def _build_news_queries(stock: dict) -> list[str]:
     name = stock.get("name") or ""
     asset_type = stock.get("asset_type") or "UNKNOWN"
@@ -419,17 +631,31 @@ def _prepare_watchlist_snapshots(static_snapshots: list[dict]) -> tuple[list[dic
     return prepared, diagnostics
 
 
+def _attach_signal_scores(prepared_snapshots: list[dict], ranking_bundle: dict, macro: dict) -> list[dict]:
+    ranking_lookup = _build_ranking_signal_lookup(ranking_bundle)
+    enriched = []
+    for snapshot in prepared_snapshots:
+        signal_score = _score_watchlist_snapshot(snapshot, ranking_lookup, macro)
+        enriched.append({**snapshot, "signal_score": signal_score})
+    return enriched
+
+
 def _build_reader_bundle(reader: SupabaseReader, report_type: str) -> dict:
     macro = reader.fetch_latest_global_macro_snapshot()
     report_base_date = macro.get("base_date")
     ranking_bundle = reader.get_latest_market_rankings(report_date=report_base_date, limit=10)
     watchlist_bundle = reader.get_watchlist_snapshots(report_date=report_base_date)
+    readiness = reader.fetch_report_readiness()
+    yield_curve = _interpret_us_10y_3y_spread(macro.get("us10y"), macro.get("us3y"))
+    if yield_curve:
+        macro["yield_curve_regime"] = yield_curve.get("regime")
+    readiness["yield_curve"] = yield_curve
     return {
         "report_type": report_type,
         "macro": macro,
         "breadth": reader.fetch_latest_market_breadth(),
         "derivatives": reader.fetch_latest_derivatives_snapshot(),
-        "readiness": reader.fetch_report_readiness(),
+        "readiness": readiness,
         "ranking_bundle": ranking_bundle,
         "watchlist_bundle": watchlist_bundle,
     }
@@ -454,6 +680,7 @@ def _log_report_diagnostics(bundle: dict, prepared_snapshots: list[dict], gemini
     logger.info("market_master_status=%s", readiness.get("market_master_status"))
     logger.info("ranking_status=%s", readiness.get("ranking_status"))
     logger.info("watchlist_price_hit_ratio=%.3f", readiness.get("watchlist_price_hit_ratio") or 0.0)
+    logger.info("yield_curve=%s", readiness.get("yield_curve"))
     logger.info("ranking_counts=%s", ranking_diag.get("ranking_counts", {}))
     logger.info("fallback_applied_sections=%s", ranking_bundle.get("fallback_applied_sections", []))
     logger.info("market_mismatch_rows=%s", len(ranking_diag.get("market_mismatch_rows", [])))
@@ -506,6 +733,7 @@ def _build_stockdata_fix_text(bundle: dict, diagnostics: dict) -> str:
 
 
 def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict, ranking_bundle: dict, diagnostics: dict) -> list[str]:
+    yield_curve = readiness.get("yield_curve")
     lines = [
         f"# {title}",
         f"- 작성시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')}",
@@ -520,6 +748,10 @@ def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict,
         f"- watchlist price hit ratio: {readiness.get('watchlist_price_hit_ratio', 0):.1%}",
         f"- 데이터 점검: {_build_data_status(readiness)}",
     ]
+    if yield_curve:
+        lines.append(
+            f"- 미국 금리: 10년물 {format_rate_level(yield_curve.get('us10y'))}, 3년물 {format_rate_level(yield_curve.get('us3y'))}, 10Y-3Y 스프레드 {format_spread_bp(yield_curve.get('spread_bp'))}"
+        )
     if ranking_bundle.get("fallback_used"):
         lines.append("- 랭킹 데이터는 최근 기준일 fallback이 포함돼 있습니다.")
     if ranking_bundle.get("fallback_applied_sections"):
@@ -707,6 +939,7 @@ def _format_watchlist_section(prepared_snapshots: list[dict], title: str = "## S
         supply_diag = snapshot.get("supply_diag") or {}
         fundamentals_diag = snapshot.get("fundamentals_diag") or {}
         short_diag = snapshot.get("short_diag") or {}
+        signal_score = snapshot.get("signal_score") or {}
         return_5d = _safe_float(features.get("return_5d"))
         return_5d_text = format_percent(return_5d * 100) if return_5d is not None else NA_TEXT
         lines.extend(
@@ -719,9 +952,12 @@ def _format_watchlist_section(prepared_snapshots: list[dict], title: str = "## S
                 f"- 외국인 보유율: {format_ratio_metric(supply.get('foreign_holding_ratio'))} (foreign_holding_date: {format_date(supply.get('base_date'))})",
                 f"- 밸류에이션: PER {fundamentals_diag['display']['per']}, PBR {fundamentals_diag['display']['pbr']}, ROE {fundamentals_diag['display']['roe']}, 부채비율 {fundamentals_diag['display']['debt_ratio']} (기준일: {format_date(fundamentals.get('base_date'))})",
                 f"- 퀀트: 5일 수익률 {return_5d_text}, MA5 {format_index(features.get('moving_avg_5'))}, MA20 {format_index(features.get('moving_avg_20'))}, 20일 변동성 {format_ratio_metric(features.get('volatility_20d'))}, 외국인 수급 z-score {format_signed_multiple(features.get('foreign_flow_zscore'), '')} (feature date: {format_date(features.get('base_date'))})",
+                f"- Signal Score: {signal_score.get('total_signal_score', NA_TEXT)} / confidence {signal_score.get('confidence', NA_TEXT)} / 라벨 {signal_score.get('label', NA_TEXT)}",
+                f"- 신호 구성: 가격 {signal_score.get('price_momentum_score', NA_TEXT)}, 거래 {signal_score.get('volume_trading_score', NA_TEXT)}, 수급 {signal_score.get('supply_score', NA_TEXT)}, 밸류 {signal_score.get('valuation_score', NA_TEXT)}, 리스크 {signal_score.get('risk_score', NA_TEXT)}, 매크로 적합도 {signal_score.get('macro_fit_score', NA_TEXT)}",
                 f"- 공매도: {short_diag['summary']} (기준일: {format_date((snapshot.get('short_selling') or {}).get('base_date'))})",
                 f"- 공시 이벤트: {event.get('event_type') or NA_TEXT} / {event.get('event_score') if event.get('event_score') is not None else NA_TEXT} / {event.get('sentiment_score') if event.get('sentiment_score') is not None else NA_TEXT}",
                 f"- 해석: {snapshot.get('quant_comment')}",
+                f"- 전략 메모: {signal_score.get('strategy_memo', NA_TEXT)}",
             ]
         )
         if short_diag.get("note"):
@@ -743,7 +979,10 @@ def _build_data_status_summary(readiness: dict, ranking_bundle: dict, diagnostic
         f"- watchlist price hit ratio: {readiness.get('watchlist_price_hit_ratio', 0):.1%}",
         f"- market mismatch rows: {len(ranking_diag.get('market_mismatch_rows', []))}",
         f"- q-prefix rows: {len(ranking_diag.get('q_prefix_rows', []))}",
+        f"- signal model: {SIGNAL_MODEL_VERSION}",
     ]
+    if readiness.get("yield_curve"):
+        lines.append(f"- yield curve regime: {readiness['yield_curve'].get('regime')}")
     if ranking_bundle.get("fallback_applied_sections"):
         lines.append(f"- fallback 적용 섹션: {', '.join(ranking_bundle.get('fallback_applied_sections', []))}")
     if diagnostics["watchlist_missing_prices"]:
@@ -765,6 +1004,7 @@ def _build_morning_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     breadth = bundle["breadth"]
     readiness = bundle["readiness"]
     ranking_bundle = bundle["ranking_bundle"]
+    yield_curve = readiness.get("yield_curve")
     positives, burdens, watchpoints = _build_market_impact_lists(macro)
     naver_service = NaverNewsService()
     lines = _build_header_lines("Morning Market Brief", now_kst, readiness, ranking_bundle, diagnostics)
@@ -782,6 +1022,13 @@ def _build_morning_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
         ]
     )
     lines.extend(_generate_us_market_summary(macro, news_text, analyzer, gemini_tracker))
+    if yield_curve:
+        lines.extend(
+            [
+                f"- 미국 금리: 10년물 {format_rate_level(yield_curve.get('us10y'))}, 3년물 {format_rate_level(yield_curve.get('us3y'))}, 10Y-3Y 스프레드 {format_spread_bp(yield_curve.get('spread_bp'))}",
+                f"- 금리차 해석: {yield_curve.get('plain_korean_summary')} {yield_curve.get('equity_implication')}",
+            ]
+        )
     lines.extend(["", "## 한국시장 예상 영향", "- 긍정 요인:"])
     lines.extend([f"  - {item}" for item in positives])
     lines.append("- 부담 요인:")
@@ -803,6 +1050,7 @@ def _build_regular_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
     ranking_bundle = bundle["ranking_bundle"]
+    yield_curve = readiness.get("yield_curve")
     naver_service = NaverNewsService()
     judgment = _infer_market_judgment(macro, breadth)
     lines = _build_header_lines(f"Intraday Market Brief | {_get_regular_slot_label(now_kst)}", now_kst, readiness, ranking_bundle, diagnostics)
@@ -813,6 +1061,7 @@ def _build_regular_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
             f"- 원/달러: {format_usdkrw(macro.get('usdkrw'))}",
             f"- DXY: {format_plain_number(macro.get('dxy'))}",
             f"- 미국 10년물 / 한국 10년물: {format_rate_percent(macro.get('us10y'))} / {format_rate_percent(macro.get('kr10y'))}",
+            f"- 미국 3년물 / 10Y-3Y 스프레드: {format_rate_level(macro.get('us3y'))} / {format_spread_bp((yield_curve or {}).get('spread_bp')) if yield_curve else NA_TEXT}",
             f"- KOSPI: {format_index(macro.get('kospi'))} ({format_percent(macro.get('kospi_change_rate'))})",
             f"- KOSDAQ: {format_index(macro.get('kosdaq'))} ({format_percent(macro.get('kosdaq_change_rate'))})",
             f"- {label_for_column('kospi200_futures')}: {format_index(derivatives.get('kospi200_futures'))}",
@@ -821,6 +1070,8 @@ def _build_regular_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
             "",
         ]
     )
+    if yield_curve:
+        lines.extend([f"- 금리차 해석: {yield_curve.get('plain_korean_summary')} {yield_curve.get('watchpoint')}", ""])
     lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
     lines.append("")
     lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
@@ -837,6 +1088,7 @@ def _build_closing_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
     ranking_bundle = bundle["ranking_bundle"]
+    yield_curve = readiness.get("yield_curve")
     naver_service = NaverNewsService()
     judgment = _infer_market_judgment(macro, breadth)
     lines = _build_header_lines("Closing Market Brief", now_kst, readiness, ranking_bundle, diagnostics)
@@ -850,12 +1102,15 @@ def _build_closing_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
             f"- KOSDAQ 수급: 개인 {_format_market_flow(macro.get('kosdaq_individual_net_buy'))}, 외국인 {_format_market_flow(macro.get('kosdaq_foreign_net_buy'))}, 기관 {_format_market_flow(macro.get('kosdaq_institutional_net_buy'))}",
             f"- 원/달러: {format_usdkrw(macro.get('usdkrw'))}",
             f"- 미국 10년물 / 한국 10년물: {format_rate_percent(macro.get('us10y'))} / {format_rate_percent(macro.get('kr10y'))}",
+            f"- 미국 3년물 / 10Y-3Y 스프레드: {format_rate_level(macro.get('us3y'))} / {format_spread_bp((yield_curve or {}).get('spread_bp')) if yield_curve else NA_TEXT}",
             f"- DXY / VIX / SOX: {format_plain_number(macro.get('dxy'))} / {format_plain_number(macro.get('vix'))} / {format_index(macro.get('sox'))}",
             f"- {label_for_column('kospi200_futures')}: {format_index(derivatives.get('kospi200_futures'))}",
             f"- 마감 판단: {judgment}",
             "",
         ]
     )
+    if yield_curve:
+        lines.extend([f"- 금리차 해석: {yield_curve.get('plain_korean_summary')} {yield_curve.get('market_implication')}", ""])
     lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
     lines.append("")
     lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
@@ -893,10 +1148,12 @@ def run_report(report_type: str, now_kst: datetime.datetime, send_enabled: bool 
     news_text = reader.prepare_news_context(reader.fetch_news_document())
 
     prepared_snapshots, diagnostics = _prepare_watchlist_snapshots(bundle["watchlist_bundle"]["snapshots"])
+    prepared_snapshots = _attach_signal_scores(prepared_snapshots, bundle["ranking_bundle"], bundle["macro"])
     event_map = _collect_ranking_event_map(reader, bundle["ranking_bundle"])
     gemini_tracker = {"count": 0, "purposes": []}
 
     _log_report_diagnostics(bundle, prepared_snapshots, gemini_tracker)
+    logger.info("signal_model_version=%s", SIGNAL_MODEL_VERSION)
     logger.warning("StockData 전달용 수정 명령어:\n%s", _build_stockdata_fix_text(bundle, diagnostics))
 
     if report_type == "morning":

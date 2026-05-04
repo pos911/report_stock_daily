@@ -6,6 +6,7 @@ from src.utils.formatters import (
     format_market_cap,
     format_percent,
     format_price,
+    format_spread_bp,
     format_trading_value,
     format_usdkrw,
     format_volume,
@@ -34,7 +35,11 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_market_cap(432_100_000_000_000), "432.1조원")
         self.assertEqual(format_market_cap(None), NA_TEXT)
 
+    def test_format_spread_bp(self):
+        self.assertEqual(format_spread_bp(50.2), "+50.2bp")
+        self.assertEqual(format_spread_bp(-20.5), "-20.5bp")
+        self.assertEqual(format_spread_bp(None), NA_TEXT)
+
 
 if __name__ == "__main__":
     unittest.main()
-

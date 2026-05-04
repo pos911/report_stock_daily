@@ -42,7 +42,10 @@ Environment-specific settings or those required for automated pipelines:
 - **Two-Step Strict Separation & Assembly**: 
     - The LLM prompts must exclusively generate their assigned section's deep content (Step 1: Macro/News, Step 2: Stock Analysis) without overarching headers (`#`, `##`), greetings, or conclusions.
     - Python (`generate_report.py`) handles the structural assembly and layout headers.
-- **Aggressive vs Conservative View**: Stock analysis must avoid plain narrative lists. It strictly enforces a 3-step bullet point structure: `1) 공격적인 포인트`, `2) 최대한 보수적인 포인트`, `3) 최종 결론 (BUY/HOLD/SELL)`.
+- **Signal-Based Interpretation Rule**:
+    - Before backtesting, the report must not emit deterministic `BUY/HOLD/SELL` style recommendations.
+    - Use signal labels such as `비중확대 후보`, `보유/관찰`, `관망`, `리스크 축소 후보`, `판단 유보`.
+    - `Signal Score v0.1` is a heuristic layer and not a validated investment model.
 - **Zero-Waste Prompting**: The LLM must NEVER output excuses about missing data. If data is absent, the model must silently skip it. Do not say "Data is not provided" or "결측치입니다".
 - **Morning Report Data Source Rule**: Morning Market Brief sections must use Supabase StockData official tables as the source of truth. Market, macro, price, supply, valuation, short-selling, event, and feature numbers must come only from the official Supabase tables, not from external market-price crawlers.
 - **All Report Data Source Rule**: `morning`, `regular`, and `closing` reports must use Supabase official tables only for numeric data, must use `static_stock_universe.enabled = true` for watchlist coverage, and must not read `config/target_stocks.json` or local hardcoded target lists.
@@ -59,3 +62,9 @@ Environment-specific settings or those required for automated pipelines:
 - **External Data Rule**:
     - report는 KIS/네이버/기타 외부 시세 API로 숫자를 직접 조회하지 않는다.
     - Naver API와 Google Docs는 뉴스·주목 사유 보강에만 사용한다.
+- **Yield Curve Rule**:
+    - Macro snapshot must read `us10y`, `us3y`, and derive `us10y_us3y_spread_bp`.
+    - The 10Y-3Y spread is a context signal for policy and growth expectations, not a standalone market-timing signal.
+- **Backtest Plan**:
+    - `scripts/backtest_signal_score.py` is the bootstrap path for validating forward returns by signal-score bucket.
+    - Until that validation is complete, signal labels remain heuristic guidance only.

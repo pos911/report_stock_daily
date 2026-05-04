@@ -28,8 +28,16 @@ def format_rate_percent(value) -> str:
     return NA_TEXT if is_missing(value) else f"{float(value):.2f}%"
 
 
+def format_rate_level(value) -> str:
+    return format_rate_percent(value)
+
+
 def format_bp(value) -> str:
     return NA_TEXT if is_missing(value) else f"{float(value):+.1f}bp"
+
+
+def format_spread_bp(value) -> str:
+    return format_bp(value)
 
 
 def format_usdkrw(value) -> str:
@@ -94,4 +102,3 @@ def format_signed_multiple(value, suffix: str) -> str:
 
 def format_ratio_metric(value, suffix: str = "%") -> str:
     return NA_TEXT if is_missing(value) else f"{float(value):.1f}{suffix}"
-

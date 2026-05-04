@@ -46,6 +46,7 @@ class SupabaseReader:
             raise ValueError("Supabase URL and Key must be provided via Env or JSON.")
 
         self.client: Client = create_client(self.url, self.key)
+        self.page_size = 1000
 
     # -------------------------------------------------------------------------
     # Internal helpers
@@ -60,6 +61,22 @@ class SupabaseReader:
         except Exception as e:
             print(f"[WARNING] _fetch_stock_name_map 실패: {e}")
         return {}
+
+    def _execute_paged_query(self, table_name: str, columns: str, query_mutator=None, batch_size: int | None = None):
+        batch = batch_size or self.page_size
+        start = 0
+        rows = []
+        while True:
+            query = self.client.table(table_name).select(columns)
+            if query_mutator is not None:
+                query = query_mutator(query)
+            response = query.range(start, start + batch - 1).execute()
+            data = response.data or []
+            rows.extend(data)
+            if len(data) < batch:
+                break
+            start += batch
+        return rows
 
     def _fetch_and_ffill_timeseries(self, table_name, lookback_days=5, as_of_utc_iso: str = None):
         """
@@ -940,7 +957,7 @@ class SupabaseReader:
 
     def fetch_latest_global_macro_snapshot(self):
         columns = (
-            "base_date, usdkrw, dxy, us10y, kr10y, kospi, kospi_change_rate, "
+            "base_date, usdkrw, dxy, us10y, us3y, kr10y, kospi, kospi_change_rate, "
             "kosdaq, kosdaq_change_rate, nasdaq, nasdaq_change_rate, sp500, "
             "sp500_change_rate, sox, vix, wti, brent, gold, copper, bdry, "
             "hy_spread, kospi_individual_net_buy, kospi_foreign_net_buy, "
@@ -955,7 +972,21 @@ class SupabaseReader:
                 .limit(1)
                 .execute()
             )
-            return (response.data or [{}])[0]
+            row = (response.data or [{}])[0]
+            us10y = row.get("us10y")
+            us3y = row.get("us3y")
+            try:
+                if us10y is not None and us3y is not None:
+                    spread = float(us10y) - float(us3y)
+                    row["us10y_us3y_spread"] = spread
+                    row["us10y_us3y_spread_bp"] = spread * 100
+                else:
+                    row["us10y_us3y_spread"] = None
+                    row["us10y_us3y_spread_bp"] = None
+            except (TypeError, ValueError):
+                row["us10y_us3y_spread"] = None
+                row["us10y_us3y_spread_bp"] = None
+            return row
         except Exception as exc:
             print(f"[WARNING] fetch_latest_global_macro_snapshot failed: {exc}")
             return {}
@@ -1004,7 +1035,14 @@ class SupabaseReader:
                 .order("symbol")
                 .execute()
             )
-            return response.data or []
+            rows = response.data or []
+            normalized_rows = []
+            for row in rows:
+                symbol = canonicalize_symbol(row.get("symbol"))
+                if not symbol:
+                    continue
+                normalized_rows.append({**row, "symbol": symbol})
+            return normalized_rows
         except Exception as exc:
             print(f"[WARNING] fetch_static_stock_universe failed: {exc}")
             return []
@@ -1066,13 +1104,14 @@ class SupabaseReader:
 
         selected = {}
         for symbol in symbols:
-            symbol_rows = grouped.get(symbol, [])
+            canonical = canonicalize_symbol(symbol)
+            symbol_rows = grouped.get(canonical, [])
             if not symbol_rows:
-                selected[symbol] = {}
+                selected[canonical] = {}
                 continue
-            price_date = (price_map.get(symbol) or {}).get("base_date")
+            price_date = (price_map.get(canonical) or {}).get("base_date")
             exact = next((row for row in symbol_rows if row.get("base_date") == price_date), None)
-            selected[symbol] = exact or symbol_rows[0]
+            selected[canonical] = exact or symbol_rows[0]
         return selected
 
     def fetch_stock_feature_pivot(self, symbols, feature_names):
@@ -1231,14 +1270,11 @@ class SupabaseReader:
         if not candidate_dates:
             return []
         try:
-            response = (
-                self.client.table("normalized_market_rankings_daily")
-                .select("*")
-                .in_("base_date", candidate_dates)
-                .limit(20000)
-                .execute()
+            return self._execute_paged_query(
+                "normalized_market_rankings_daily",
+                "*",
+                query_mutator=lambda query: query.in_("base_date", candidate_dates),
             )
-            return response.data or []
         except Exception as exc:
             print(f"[WARNING] _fetch_market_ranking_rows_for_dates failed: {exc}")
             return []
@@ -1540,17 +1576,14 @@ class SupabaseReader:
         if not base_date:
             return []
         try:
-            response = (
-                self.client.table("normalized_stock_prices_daily")
-                .select(
+            return self._execute_paged_query(
+                "normalized_stock_prices_daily",
+                (
                     "symbol, base_date, open_price, high_price, low_price, close_price, "
                     "volume, trading_value, market_cap, outstanding_shares, available_at"
-                )
-                .eq("base_date", base_date)
-                .limit(10000)
-                .execute()
+                ),
+                query_mutator=lambda query: query.eq("base_date", base_date),
             )
-            return response.data or []
         except Exception as exc:
             print(f"[WARNING] fetch_price_rows_by_date failed: {exc}")
             return []
@@ -1565,23 +1598,23 @@ class SupabaseReader:
         ]
         for columns in candidate_selects:
             try:
-                response = (
-                    self.client.table("raw_stock_prices_daily")
-                    .select(columns)
-                    .eq("base_date", base_date)
-                    .limit(10000)
-                    .execute()
+                rows = self._execute_paged_query(
+                    "raw_stock_prices_daily",
+                    columns,
+                    query_mutator=lambda query: query.eq("base_date", base_date),
                 )
-                if response.data is not None:
-                    return response.data or []
+                if rows is not None:
+                    return rows or []
             except Exception:
                 continue
         return []
 
     def fetch_stocks_master_map(self):
         try:
-            response = self.client.table("stocks_master").select("symbol, name, market, is_active, updated_at").execute()
-            rows = response.data or []
+            rows = self._execute_paged_query(
+                "stocks_master",
+                "symbol, name, market, is_active, updated_at",
+            )
         except Exception as exc:
             print(f"[WARNING] fetch_stocks_master_map failed: {exc}")
             rows = []
@@ -1689,7 +1722,8 @@ class SupabaseReader:
 
     def fetch_static_universe_stock_snapshot(self, price_base_date: str | None = None):
         static_universe = self.fetch_static_stock_universe()
-        symbols = [item["symbol"] for item in static_universe if item.get("symbol")]
+        symbols = [canonicalize_symbol(item.get("symbol")) for item in static_universe if item.get("symbol")]
+        symbols = [symbol for symbol in symbols if symbol]
         if not symbols:
             return []
 
