@@ -55,6 +55,7 @@ SIGNAL_MODEL_VERSION = "v0.1_unbacktested"
 def _parse_args():
     parser = argparse.ArgumentParser(description="Daily Quant Report Generator")
     parser.add_argument("--type", dest="report_type", default="regular")
+    parser.add_argument("--date", dest="report_date", help="Report date in YYYYMMDD or YYYY-MM-DD (KST basis).")
     parser.add_argument("--dry-run", action="store_true", help="Generate report only and skip Telegram sending.")
     parser.add_argument("--no-send", action="store_true", help="Generate report only and skip Telegram sending.")
     args = parser.parse_args()
@@ -67,6 +68,15 @@ def _parse_args():
 
 def _get_now_kst() -> datetime.datetime:
     return datetime.datetime.now(KST)
+
+
+def _normalize_report_date(report_date: str | None, now_kst: datetime.datetime) -> str:
+    if not report_date:
+        return now_kst.date().isoformat()
+    text = str(report_date).strip()
+    if len(text) == 8 and text.isdigit():
+        return datetime.datetime.strptime(text, "%Y%m%d").date().isoformat()
+    return datetime.date.fromisoformat(text).isoformat()
 
 
 def _get_regular_slot_label(now_kst: datetime.datetime) -> str:
@@ -104,6 +114,43 @@ def _clean_report_text(report_content: str) -> str:
             continue
         lines.append(line.rstrip())
     return "\n".join(lines).strip() + "\n"
+
+
+def _should_include_kr_sections(calendar_status: dict) -> bool:
+    return calendar_status.get("report_market_mode") in {"FULL_REPORT", "KOREA_ONLY", "CALENDAR_UNKNOWN"}
+
+
+def _should_include_us_sections(calendar_status: dict) -> bool:
+    return calendar_status.get("report_market_mode") in {"FULL_REPORT", "US_ONLY", "CALENDAR_UNKNOWN"}
+
+
+def _should_skip_all_markets(calendar_status: dict) -> bool:
+    return calendar_status.get("report_market_mode") == "SKIP_ALL_MARKETS_CLOSED"
+
+
+def _build_market_mode_banner(calendar_status: dict) -> str:
+    mode = calendar_status.get("report_market_mode")
+    if mode == "KOREA_ONLY":
+        return "시장 기준: 한국장 개장 / 미국장 휴장"
+    if mode == "US_ONLY":
+        return "시장 기준: 한국장 휴장 / 미국장 개장"
+    if mode == "SKIP_ALL_MARKETS_CLOSED":
+        return "시장 기준: 한국장·미국장 모두 휴장"
+    if mode == "CALENDAR_UNKNOWN":
+        return "시장 기준: calendar fallback 사용"
+    return "시장 기준: 한국장 개장 / 미국장 개장"
+
+
+def _build_market_closed_skip_text(report_type: str, now_kst: datetime.datetime, calendar_status: dict) -> str:
+    lines = [
+        f"SKIPPED_REPORT_MARKET_CLOSED | type={report_type}",
+        f"- 작성시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')}",
+        f"- report_date: {calendar_status.get('report_date')}",
+        f"- XKRX: closed ({calendar_status.get('xkrx_reason')}) / prev {calendar_status.get('xkrx_previous_trading_day') or NA_TEXT}",
+        f"- XNYS: closed ({calendar_status.get('xnys_reason')}) / prev {calendar_status.get('xnys_previous_trading_day') or NA_TEXT}",
+        "- status: SKIPPED_REPORT_MARKET_CLOSED",
+    ]
+    return "\n".join(lines)
 
 
 def _truncate_text(text: str, max_len: int = 110) -> str:
@@ -640,24 +687,56 @@ def _attach_signal_scores(prepared_snapshots: list[dict], ranking_bundle: dict, 
     return enriched
 
 
-def _build_reader_bundle(reader: SupabaseReader, report_type: str) -> dict:
+def _build_reader_bundle(reader: SupabaseReader, report_type: str, report_date: str, calendar_status: dict) -> dict:
+    mode = calendar_status.get("report_market_mode")
     macro = reader.fetch_latest_global_macro_snapshot()
-    report_base_date = macro.get("base_date")
-    ranking_bundle = reader.get_latest_market_rankings(report_date=report_base_date, limit=10)
-    watchlist_bundle = reader.get_watchlist_snapshots(report_date=report_base_date)
-    readiness = reader.fetch_report_readiness()
+    report_base_date = report_date or macro.get("base_date")
+    if mode == "US_ONLY":
+        ranking_bundle = {
+            "ranking_base_date": None,
+            "price_base_date": None,
+            "latest_valid_price_date": None,
+            "fallback_used": False,
+            "sections": {"volume": {}, "trading_value": {}, "market_cap": {}},
+            "diagnostics": {"market_mismatch_rows": [], "q_prefix_rows": [], "legacy_source_rows": [], "ranking_counts": {}},
+            "ranking_status": "한국장 휴장",
+            "price_meta": {},
+            "fallback_applied_sections": [],
+        }
+        watchlist_bundle = {"price_base_date": None, "snapshots": [], "price_meta": {}}
+        readiness = {
+            "latest_macro_date": macro.get("base_date"),
+            "latest_valid_price_date": None,
+            "market_master_status": "한국장 휴장",
+            "ranking_status": "한국장 휴장",
+            "price_status": "한국장 휴장",
+            "watchlist_price_hit_ratio": 0.0,
+            "minimum_report_ready": bool(macro),
+            "ranking_ready": False,
+            "watchlist_ready": False,
+        }
+        breadth = {}
+        derivatives = {}
+    else:
+        ranking_bundle = reader.get_latest_market_rankings(report_date=report_base_date, limit=10)
+        watchlist_bundle = reader.get_watchlist_snapshots(report_date=report_base_date)
+        readiness = reader.fetch_report_readiness()
+        breadth = reader.fetch_latest_market_breadth()
+        derivatives = reader.fetch_latest_derivatives_snapshot()
     yield_curve = _interpret_us_10y_3y_spread(macro.get("us10y"), macro.get("us3y"))
     if yield_curve:
         macro["yield_curve_regime"] = yield_curve.get("regime")
     readiness["yield_curve"] = yield_curve
+    readiness["calendar_status"] = calendar_status
     return {
         "report_type": report_type,
         "macro": macro,
-        "breadth": reader.fetch_latest_market_breadth(),
-        "derivatives": reader.fetch_latest_derivatives_snapshot(),
+        "breadth": breadth,
+        "derivatives": derivatives,
         "readiness": readiness,
         "ranking_bundle": ranking_bundle,
         "watchlist_bundle": watchlist_bundle,
+        "calendar_status": calendar_status,
     }
 
 
@@ -732,22 +811,28 @@ def _build_stockdata_fix_text(bundle: dict, diagnostics: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict, ranking_bundle: dict, diagnostics: dict) -> list[str]:
+def _build_header_lines(title: str, now_kst: datetime.datetime, readiness: dict, ranking_bundle: dict, diagnostics: dict, calendar_status: dict) -> list[str]:
     yield_curve = readiness.get("yield_curve")
     lines = [
         f"# {title}",
         f"- 작성시각: {now_kst.strftime('%Y-%m-%d %H:%M KST')}",
         "- 수치 기준: Supabase StockData 공식 테이블",
+        f"- report_market_mode: {calendar_status.get('report_market_mode')}",
+        f"- { _build_market_mode_banner(calendar_status) }",
         f"- 랭킹 기준일: {format_date(ranking_bundle.get('ranking_base_date'))}",
         f"- 가격 기준일: {format_date(ranking_bundle.get('price_base_date'))}",
         f"- 매크로 기준일: {format_date(readiness.get('latest_macro_date'))}",
         "- 관심종목 기준: static_stock_universe.enabled=true",
+        f"- XKRX: {'open' if calendar_status.get('xkrx_is_open') else 'closed'} / {calendar_status.get('xkrx_reason') or NA_TEXT} / prev {calendar_status.get('xkrx_previous_trading_day') or NA_TEXT}",
+        f"- XNYS: {'open' if calendar_status.get('xnys_is_open') else 'closed'} / {calendar_status.get('xnys_reason') or NA_TEXT} / prev {calendar_status.get('xnys_previous_trading_day') or NA_TEXT}",
         f"- market master 상태: {readiness.get('market_master_status')}",
         f"- 랭킹 데이터 상태: {readiness.get('ranking_status')}",
         f"- 가격 데이터 상태: {readiness.get('price_status')}",
         f"- watchlist price hit ratio: {readiness.get('watchlist_price_hit_ratio', 0):.1%}",
         f"- 데이터 점검: {_build_data_status(readiness)}",
     ]
+    if calendar_status.get("calendar_fallback_used"):
+        lines.append("- calendar_fallback_used: true")
     if yield_curve:
         lines.append(
             f"- 미국 금리: 10년물 {format_rate_level(yield_curve.get('us10y'))}, 3년물 {format_rate_level(yield_curve.get('us3y'))}, 10Y-3Y 스프레드 {format_spread_bp(yield_curve.get('spread_bp'))}"
@@ -1004,24 +1089,32 @@ def _build_morning_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     breadth = bundle["breadth"]
     readiness = bundle["readiness"]
     ranking_bundle = bundle["ranking_bundle"]
+    calendar_status = bundle["calendar_status"]
+    mode = calendar_status.get("report_market_mode")
     yield_curve = readiness.get("yield_curve")
     positives, burdens, watchpoints = _build_market_impact_lists(macro)
     naver_service = NaverNewsService()
-    lines = _build_header_lines("Morning Market Brief", now_kst, readiness, ranking_bundle, diagnostics)
-    lines.extend(
-        [
-            "",
-            "## 미국시장/매크로",
-            f"- {label_for_column('sp500')}: {format_index(macro.get('sp500'))} ({format_percent(macro.get('sp500_change_rate'))})",
-            f"- {label_for_column('nasdaq')}: {format_index(macro.get('nasdaq'))} ({format_percent(macro.get('nasdaq_change_rate'))})",
-            f"- SOX: {format_index(macro.get('sox'))}",
-            f"- VIX: {format_plain_number(macro.get('vix'))}",
-            f"- 미국 10년물: {format_rate_percent(macro.get('us10y'))}",
-            f"- DXY: {format_plain_number(macro.get('dxy'))}",
-            f"- WTI / Brent / Gold / Copper: {format_plain_number(macro.get('wti'))} / {format_plain_number(macro.get('brent'))} / {format_plain_number(macro.get('gold'))} / {format_plain_number(macro.get('copper'))}",
-        ]
-    )
-    lines.extend(_generate_us_market_summary(macro, news_text, analyzer, gemini_tracker))
+    if analyzer is None and mode in {"KOREA_ONLY", "US_ONLY"}:
+        naver_service.enabled = False
+    lines = _build_header_lines("Morning Market Brief", now_kst, readiness, ranking_bundle, diagnostics, calendar_status)
+    if _should_include_us_sections(calendar_status):
+        lines.extend(
+            [
+                "",
+                "## 미국시장/매크로",
+                f"- {label_for_column('sp500')}: {format_index(macro.get('sp500'))} ({format_percent(macro.get('sp500_change_rate'))})",
+                f"- {label_for_column('nasdaq')}: {format_index(macro.get('nasdaq'))} ({format_percent(macro.get('nasdaq_change_rate'))})",
+                f"- SOX: {format_index(macro.get('sox'))}",
+                f"- VIX: {format_plain_number(macro.get('vix'))}",
+                f"- 미국 10년물: {format_rate_percent(macro.get('us10y'))}",
+                f"- DXY: {format_plain_number(macro.get('dxy'))}",
+                f"- WTI / Brent / Gold / Copper: {format_plain_number(macro.get('wti'))} / {format_plain_number(macro.get('brent'))} / {format_plain_number(macro.get('gold'))} / {format_plain_number(macro.get('copper'))}",
+            ]
+        )
+        if mode == "KOREA_ONLY":
+            lines.append(f"- 미국장은 휴장으로 신규 미국 지수 데이터는 없습니다. 직전 미국 거래일 {calendar_status.get('xnys_previous_trading_day') or NA_TEXT} 기준 참고용입니다.")
+        else:
+            lines.extend(_generate_us_market_summary(macro, news_text, analyzer, gemini_tracker))
     if yield_curve:
         lines.extend(
             [
@@ -1029,16 +1122,19 @@ def _build_morning_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
                 f"- 금리차 해석: {yield_curve.get('plain_korean_summary')} {yield_curve.get('equity_implication')}",
             ]
         )
-    lines.extend(["", "## 한국시장 예상 영향", "- 긍정 요인:"])
-    lines.extend([f"  - {item}" for item in positives])
-    lines.append("- 부담 요인:")
-    lines.extend([f"  - {item}" for item in burdens])
-    lines.append("- 오늘 관전 포인트:")
-    lines.extend([f"  - {item}" for item in watchpoints])
-    lines.append("")
-    lines.extend(_format_watchlist_section(prepared_snapshots))
-    lines.append("")
-    lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+    if _should_include_kr_sections(calendar_status):
+        lines.extend(["", "## 한국시장 예상 영향", "- 긍정 요인:"])
+        lines.extend([f"  - {item}" for item in positives])
+        lines.append("- 부담 요인:")
+        lines.extend([f"  - {item}" for item in burdens])
+        lines.append("- 오늘 관전 포인트:")
+        lines.extend([f"  - {item}" for item in watchpoints])
+        lines.append("")
+        lines.extend(_format_watchlist_section(prepared_snapshots))
+        lines.append("")
+        lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+    else:
+        lines.extend(["", "## 한국시장", "- 한국장은 휴장으로 국내 종목·랭킹 섹션은 생략합니다."])
     lines.append("")
     lines.extend(_build_data_status_summary(readiness, ranking_bundle, diagnostics))
     return _clean_report_text("\n".join(lines))
@@ -1050,10 +1146,14 @@ def _build_regular_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
     ranking_bundle = bundle["ranking_bundle"]
+    calendar_status = bundle["calendar_status"]
+    mode = calendar_status.get("report_market_mode")
     yield_curve = readiness.get("yield_curve")
     naver_service = NaverNewsService()
+    if analyzer is None and mode in {"KOREA_ONLY", "US_ONLY"}:
+        naver_service.enabled = False
     judgment = _infer_market_judgment(macro, breadth)
-    lines = _build_header_lines(f"Intraday Market Brief | {_get_regular_slot_label(now_kst)}", now_kst, readiness, ranking_bundle, diagnostics)
+    lines = _build_header_lines(f"Intraday Market Brief | {_get_regular_slot_label(now_kst)}", now_kst, readiness, ranking_bundle, diagnostics, calendar_status)
     lines.extend(
         [
             "",
@@ -1072,11 +1172,16 @@ def _build_regular_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     )
     if yield_curve:
         lines.extend([f"- 금리차 해석: {yield_curve.get('plain_korean_summary')} {yield_curve.get('watchpoint')}", ""])
-    lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
-    lines.append("")
-    lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
-    lines.append("")
-    lines.extend(_format_watchlist_section(prepared_snapshots, title="## 관심종목 변동"))
+    if mode == "KOREA_ONLY":
+        lines.extend(["- 미국장은 휴장으로 신규 미국 지수 해석은 생략합니다.", ""])
+    if _should_include_kr_sections(calendar_status):
+        lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+        lines.append("")
+        lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+        lines.append("")
+        lines.extend(_format_watchlist_section(prepared_snapshots, title="## 관심종목 변동"))
+    else:
+        lines.extend(["## 한국시장", "- 한국장은 휴장으로 국내 종목·랭킹·Signal Score 섹션을 생략합니다."])
     lines.append("")
     lines.extend(_build_data_status_summary(readiness, ranking_bundle, diagnostics))
     return _clean_report_text("\n".join(lines))
@@ -1088,10 +1193,14 @@ def _build_closing_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     derivatives = bundle["derivatives"]
     readiness = bundle["readiness"]
     ranking_bundle = bundle["ranking_bundle"]
+    calendar_status = bundle["calendar_status"]
+    mode = calendar_status.get("report_market_mode")
     yield_curve = readiness.get("yield_curve")
     naver_service = NaverNewsService()
+    if analyzer is None and mode in {"KOREA_ONLY", "US_ONLY"}:
+        naver_service.enabled = False
     judgment = _infer_market_judgment(macro, breadth)
-    lines = _build_header_lines("Closing Market Brief", now_kst, readiness, ranking_bundle, diagnostics)
+    lines = _build_header_lines("Closing Market Brief", now_kst, readiness, ranking_bundle, diagnostics, calendar_status)
     lines.extend(
         [
             "",
@@ -1111,21 +1220,26 @@ def _build_closing_report(bundle: dict, now_kst: datetime.datetime, analyzer: Ge
     )
     if yield_curve:
         lines.extend([f"- 금리차 해석: {yield_curve.get('plain_korean_summary')} {yield_curve.get('market_implication')}", ""])
-    lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
-    lines.append("")
-    lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
-    lines.append("")
-    lines.extend(_format_watchlist_section(prepared_snapshots, title="## 관심종목 종가/수급/공매도/밸류 점검"))
-    lines.extend(
-        [
-            "",
-            "## 다음 거래일 체크포인트",
-            "- 환율과 미국 증시 마감 방향이 국내 위험선호를 유지시키는지 확인",
-            "- 거래량/거래대금 상위 종목이 단기 순환매인지, 특정 테마 확산인지 구분",
-            "- 관심종목의 가격 흐름과 외국인 수급이 동행하는지 점검",
-            "",
-        ]
-    )
+    if mode == "KOREA_ONLY":
+        lines.extend(["- 미국장은 휴장으로 신규 미국 증시 해석은 생략하고, 직전 미국 거래일 수치만 참고합니다.", ""])
+    if _should_include_kr_sections(calendar_status):
+        lines.extend(_format_volume_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+        lines.append("")
+        lines.extend(_format_trading_value_sections(ranking_bundle, naver_service, analyzer, news_text, event_map, gemini_tracker))
+        lines.append("")
+        lines.extend(_format_watchlist_section(prepared_snapshots, title="## 관심종목 종가/수급/공매도/밸류 점검"))
+        lines.extend(
+            [
+                "",
+                "## 다음 거래일 체크포인트",
+                "- 환율과 미국 증시 마감 방향이 국내 위험선호를 유지시키는지 확인",
+                "- 거래량/거래대금 상위 종목이 단기 순환매인지, 특정 테마 확산인지 구분",
+                "- 관심종목의 가격 흐름과 외국인 수급이 동행하는지 점검",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["## 한국시장", "- 한국장은 휴장으로 국내 종목·랭킹·수급 섹션을 생략합니다.", ""])
     lines.extend(_build_data_status_summary(readiness, ranking_bundle, diagnostics))
     return _clean_report_text("\n".join(lines))
 
@@ -1139,17 +1253,37 @@ def _save_report(report_type: str, report_content: str, now_kst: datetime.dateti
     return file_path
 
 
-def run_report(report_type: str, now_kst: datetime.datetime, send_enabled: bool = True):
+def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | None = None, send_enabled: bool = True):
     reader = SupabaseReader()
+    normalized_report_date = _normalize_report_date(report_date, now_kst)
+    calendar_status = reader.fetch_market_calendar_status(normalized_report_date)
+    logger.info("calendar_status=%s", calendar_status)
+
+    if _should_skip_all_markets(calendar_status):
+        skip_text = _build_market_closed_skip_text(report_type, now_kst, calendar_status)
+        logger.info("SKIPPED_REPORT_MARKET_CLOSED")
+        logger.info("\n%s", skip_text)
+        if not send_enabled:
+            logger.info("DRY RUN: Telegram send skipped because all relevant markets are closed")
+        else:
+            logger.info("Telegram send skipped: all relevant markets closed")
+        return
+
     analyzer = _safe_get_analyzer()
+    if not send_enabled and calendar_status.get("report_market_mode") in {"KOREA_ONLY", "US_ONLY"}:
+        analyzer = None
+        logger.info("Dry-run partial-market mode: Gemini disabled to conserve quota")
     logger.info("Supabase official tables bundle loading...")
-    bundle = _build_reader_bundle(reader, report_type)
-    logger.info("Google Docs news loading...")
-    news_text = reader.prepare_news_context(reader.fetch_news_document())
+    bundle = _build_reader_bundle(reader, report_type, normalized_report_date, calendar_status)
+    mode = calendar_status.get("report_market_mode")
+    news_text = ""
+    if mode != "SKIP_ALL_MARKETS_CLOSED":
+        logger.info("Google Docs news loading...")
+        news_text = reader.prepare_news_context(reader.fetch_news_document())
 
     prepared_snapshots, diagnostics = _prepare_watchlist_snapshots(bundle["watchlist_bundle"]["snapshots"])
     prepared_snapshots = _attach_signal_scores(prepared_snapshots, bundle["ranking_bundle"], bundle["macro"])
-    event_map = _collect_ranking_event_map(reader, bundle["ranking_bundle"])
+    event_map = _collect_ranking_event_map(reader, bundle["ranking_bundle"]) if _should_include_kr_sections(calendar_status) else {}
     gemini_tracker = {"count": 0, "purposes": []}
 
     _log_report_diagnostics(bundle, prepared_snapshots, gemini_tracker)
@@ -1182,7 +1316,7 @@ def main():
     now_kst = _get_now_kst()
     send_enabled = not (args.dry_run or args.no_send)
     logger.info("=== Daily Report Pipeline start [type=%s dry_run=%s] ===", args.report_type, not send_enabled)
-    run_report(args.report_type, now_kst, send_enabled=send_enabled)
+    run_report(args.report_type, now_kst, report_date=args.report_date, send_enabled=send_enabled)
 
 
 if __name__ == "__main__":

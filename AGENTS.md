@@ -68,3 +68,9 @@ Environment-specific settings or those required for automated pipelines:
 - **Backtest Plan**:
     - `scripts/backtest_signal_score.py` is the bootstrap path for validating forward returns by signal-score bucket.
     - Until that validation is complete, signal labels remain heuristic guidance only.
+- **Market Calendar Rule**:
+    - report uses `market_trading_calendar` to determine XKRX and XNYS open/closed status.
+    - If both markets are closed, Telegram sending is skipped and the run exits normally.
+    - If one market is closed, only the open market's sections are generated as first-class sections.
+    - U.S. market holidays do not block FRED/ECOS macro usage, but U.S. equity index data should not be described as new observations on that day.
+    - Korea market holidays suppress domestic watchlist, ranking, supply, and short-selling sections as new-market signals.

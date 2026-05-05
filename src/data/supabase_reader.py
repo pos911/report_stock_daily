@@ -48,6 +48,161 @@ class SupabaseReader:
         self.client: Client = create_client(self.url, self.key)
         self.page_size = 1000
 
+    @staticmethod
+    def _normalize_report_date(report_date=None) -> datetime.date:
+        if report_date is None:
+            return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).date()
+        if isinstance(report_date, datetime.datetime):
+            return report_date.date()
+        if isinstance(report_date, datetime.date):
+            return report_date
+        text = str(report_date).strip()
+        if len(text) == 8 and text.isdigit():
+            return datetime.datetime.strptime(text, "%Y%m%d").date()
+        return datetime.date.fromisoformat(text)
+
+    @staticmethod
+    def _to_bool(value):
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"true", "t", "1", "y", "yes", "open"}:
+            return True
+        if text in {"false", "f", "0", "n", "no", "closed", "holiday"}:
+            return False
+        return None
+
+    @staticmethod
+    def _determine_report_market_mode(xkrx_is_open, xnys_is_open, calendar_available: bool = True) -> str:
+        if not calendar_available:
+            return "CALENDAR_UNKNOWN"
+        if xkrx_is_open and xnys_is_open:
+            return "FULL_REPORT"
+        if xkrx_is_open and not xnys_is_open:
+            return "KOREA_ONLY"
+        if not xkrx_is_open and xnys_is_open:
+            return "US_ONLY"
+        return "SKIP_ALL_MARKETS_CLOSED"
+
+    def _fetch_market_calendar_rows(self, report_date: datetime.date):
+        exchanges = ["XKRX", "XNYS"]
+        start_date = (report_date - datetime.timedelta(days=14)).isoformat()
+        end_date = (report_date + datetime.timedelta(days=14)).isoformat()
+        date_columns = ("calendar_date", "trade_date", "base_date", "date")
+
+        for date_column in date_columns:
+            try:
+                rows = self._execute_paged_query(
+                    "market_trading_calendar",
+                    "*",
+                    query_mutator=lambda query, dc=date_column: query.in_("exchange_code", exchanges).gte(dc, start_date).lte(dc, end_date).order(dc),
+                )
+                if rows:
+                    return rows, date_column
+            except Exception:
+                continue
+        raise RuntimeError("market_trading_calendar unavailable")
+
+    def _build_exchange_calendar_status(self, rows: list[dict], exchange_code: str, report_date: datetime.date, date_column: str):
+        exchange_rows = [row for row in rows if str(row.get("exchange_code")).strip().upper() == exchange_code]
+        exchange_rows.sort(key=lambda row: str(row.get(date_column) or ""))
+
+        def row_date(row):
+            raw = row.get(date_column)
+            return datetime.date.fromisoformat(str(raw))
+
+        def is_open_row(row):
+            for key in ("is_open", "open", "is_trading_day", "trading_day", "is_business_day"):
+                if key in row:
+                    value = self._to_bool(row.get(key))
+                    if value is not None:
+                        return value
+            status_text = str(row.get("status") or row.get("session_status") or "").lower()
+            if "open" in status_text:
+                return True
+            if any(token in status_text for token in ("closed", "holiday", "skip")):
+                return False
+            return None
+
+        current = next((row for row in exchange_rows if str(row.get(date_column)) == report_date.isoformat()), None)
+        previous_open = None
+        next_open = None
+        for row in exchange_rows:
+            try:
+                current_date = row_date(row)
+            except Exception:
+                continue
+            if is_open_row(row) is True and current_date < report_date:
+                previous_open = current_date.isoformat()
+            if is_open_row(row) is True and current_date > report_date and next_open is None:
+                next_open = current_date.isoformat()
+
+        reason = None
+        if current:
+            reason = current.get("reason") or current.get("holiday_name") or current.get("note") or current.get("status")
+        is_open = is_open_row(current) if current else None
+        return {
+            "is_open": is_open,
+            "reason": reason or ("open" if is_open else "closed"),
+            "previous_trading_day": previous_open,
+            "next_trading_day": next_open,
+        }
+
+    def fetch_market_calendar_status(self, report_date: str | datetime.date | None = None) -> dict:
+        normalized_date = self._normalize_report_date(report_date)
+        fallback = {
+            "report_date": normalized_date.isoformat(),
+            "xkrx_is_open": normalized_date.weekday() < 5,
+            "xnys_is_open": normalized_date.weekday() < 5,
+            "xkrx_reason": "weekday fallback" if normalized_date.weekday() < 5 else "weekend fallback",
+            "xnys_reason": "weekday fallback" if normalized_date.weekday() < 5 else "weekend fallback",
+            "xkrx_previous_trading_day": None,
+            "xnys_previous_trading_day": None,
+            "xkrx_next_trading_day": None,
+            "xnys_next_trading_day": None,
+            "calendar_available": False,
+            "calendar_fallback_used": True,
+            "calendar_warning": "calendar table missing or unavailable",
+        }
+        fallback["report_market_mode"] = self._determine_report_market_mode(
+            fallback["xkrx_is_open"],
+            fallback["xnys_is_open"],
+            calendar_available=False,
+        )
+
+        try:
+            rows, date_column = self._fetch_market_calendar_rows(normalized_date)
+            xkrx = self._build_exchange_calendar_status(rows, "XKRX", normalized_date, date_column)
+            xnys = self._build_exchange_calendar_status(rows, "XNYS", normalized_date, date_column)
+            if xkrx["is_open"] is None or xnys["is_open"] is None:
+                return fallback
+            status = {
+                "report_date": normalized_date.isoformat(),
+                "xkrx_is_open": xkrx["is_open"],
+                "xnys_is_open": xnys["is_open"],
+                "xkrx_reason": xkrx["reason"],
+                "xnys_reason": xnys["reason"],
+                "xkrx_previous_trading_day": xkrx["previous_trading_day"],
+                "xnys_previous_trading_day": xnys["previous_trading_day"],
+                "xkrx_next_trading_day": xkrx["next_trading_day"],
+                "xnys_next_trading_day": xnys["next_trading_day"],
+                "calendar_available": True,
+                "calendar_fallback_used": False,
+                "calendar_warning": None,
+            }
+            status["report_market_mode"] = self._determine_report_market_mode(
+                status["xkrx_is_open"],
+                status["xnys_is_open"],
+                calendar_available=True,
+            )
+            return status
+        except Exception:
+            return fallback
+
     # -------------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------------
