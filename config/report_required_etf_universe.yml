@@ -1,0 +1,300 @@
+- symbol: "396500"
+  name: "TIGER Semiconductor TOP10"
+  sector_group: "Semiconductor"
+  theme_group: "Semiconductor"
+  provider: "Mirae Asset"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes: "Primary semiconductor sector ETF."
+- symbol: "091160"
+  name: "KODEX Semiconductor"
+  sector_group: "Semiconductor"
+  theme_group: "Semiconductor"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "091230"
+  name: "TIGER Semiconductor"
+  sector_group: "Semiconductor"
+  theme_group: "Semiconductor"
+  provider: "Mirae Asset"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "395270"
+  name: "HANARO Fn K-Semiconductor"
+  sector_group: "Semiconductor"
+  theme_group: "Semiconductor"
+  provider: "NH-Amundi"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "305720"
+  name: "KODEX Secondary Battery Industry"
+  sector_group: "Battery"
+  theme_group: "Battery"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "465330"
+  name: "RISE Secondary Battery TOP10"
+  sector_group: "Battery"
+  theme_group: "Battery"
+  provider: "KB"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "461950"
+  name: "KODEX Secondary Battery Core Materials 10"
+  sector_group: "Battery"
+  theme_group: "Battery Materials"
+  provider: "Samsung"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "462330"
+  name: "KODEX Secondary Battery Industry Leverage"
+  sector_group: "Battery"
+  theme_group: "Battery"
+  provider: "Samsung"
+  role: "satellite"
+  is_active: true
+  exclude_from_signal: true
+  exclude_reason: "Leverage product should not anchor sector signals."
+  notes:
+- symbol: "494670"
+  name: "TIGER Shipbuilding TOP10"
+  sector_group: "Shipbuilding"
+  theme_group: "Shipbuilding"
+  provider: "Mirae Asset"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0115D0"
+  name: "KODEX Shipbuilding TOP10"
+  sector_group: "Shipbuilding"
+  theme_group: "Shipbuilding"
+  provider: "Samsung"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "466920"
+  name: "SOL Shipbuilding TOP3 Plus"
+  sector_group: "Shipbuilding"
+  theme_group: "Shipbuilding"
+  provider: "Shinhan"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "441540"
+  name: "HANARO Fn Shipbuilding Shipping"
+  sector_group: "Shipbuilding"
+  theme_group: "Shipping"
+  provider: "NH-Amundi"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0080G0"
+  name: "KODEX Defense TOP10"
+  sector_group: "Defense"
+  theme_group: "Defense"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "449450"
+  name: "PLUS K-Defense"
+  sector_group: "Defense"
+  theme_group: "Defense"
+  provider: "Hanwha"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0090B0"
+  name: "PLUS K-Defense Components"
+  sector_group: "Defense"
+  theme_group: "Defense Components"
+  provider: "Hanwha"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0104G0"
+  name: "PLUS K-Defense Leverage"
+  sector_group: "Defense"
+  theme_group: "Defense"
+  provider: "Hanwha"
+  role: "satellite"
+  is_active: true
+  exclude_from_signal: true
+  exclude_reason: "Leverage product should not anchor sector signals."
+  notes:
+- symbol: "487240"
+  name: "KODEX AI Power Core Equipment"
+  sector_group: "AI Power"
+  theme_group: "Power Infrastructure"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0117V0"
+  name: "TIGER Korea AI Power Equipment TOP3 Plus"
+  sector_group: "AI Power"
+  theme_group: "Power Infrastructure"
+  provider: "Mirae Asset"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0101N0"
+  name: "RISE AI Power Infra"
+  sector_group: "AI Power"
+  theme_group: "Power Infrastructure"
+  provider: "KB"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0091P0"
+  name: "TIGER Korea Nuclear"
+  sector_group: "Nuclear"
+  theme_group: "Nuclear"
+  provider: "Mirae Asset"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "0098F0"
+  name: "KODEX Nuclear SMR"
+  sector_group: "Nuclear"
+  theme_group: "SMR"
+  provider: "Samsung"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "117460"
+  name: "KODEX Energy Chemicals"
+  sector_group: "Energy Chemicals"
+  theme_group: "Chemicals"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "139250"
+  name: "TIGER 200 Energy Chemicals"
+  sector_group: "Energy Chemicals"
+  theme_group: "Chemicals"
+  provider: "Mirae Asset"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "228790"
+  name: "TIGER Cosmetics"
+  sector_group: "Consumer"
+  theme_group: "Cosmetics"
+  provider: "Mirae Asset"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "266410"
+  name: "KODEX Consumer Staples"
+  sector_group: "Consumer"
+  theme_group: "Staples"
+  provider: "Samsung"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "091170"
+  name: "KODEX Banks"
+  sector_group: "Financials"
+  theme_group: "Banks"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "102970"
+  name: "KODEX Securities"
+  sector_group: "Financials"
+  theme_group: "Brokerage"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "091180"
+  name: "KODEX Automobiles"
+  sector_group: "Automobile"
+  theme_group: "Autos"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "244580"
+  name: "KODEX Bio"
+  sector_group: "Healthcare"
+  theme_group: "Bio"
+  provider: "Samsung"
+  role: "primary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:
+- symbol: "266420"
+  name: "KODEX Healthcare"
+  sector_group: "Healthcare"
+  theme_group: "Healthcare"
+  provider: "Samsung"
+  role: "secondary"
+  is_active: true
+  exclude_from_signal: false
+  exclude_reason:
+  notes:

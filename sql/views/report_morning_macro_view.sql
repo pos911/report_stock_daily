@@ -1,0 +1,28 @@
+create or replace view report_morning_macro_view as
+select
+    base_date,
+    sp500,
+    sp500_change_rate,
+    nasdaq,
+    nasdaq_change_rate,
+    sox,
+    vix,
+    usdkrw,
+    dxy,
+    us10y,
+    us3y,
+    (us10y - us3y) as us10y_us3y_spread,
+    kr10y,
+    brent,
+    wti,
+    kospi,
+    kospi_change_rate,
+    kosdaq,
+    kosdaq_change_rate,
+    kospi_foreign_net_buy,
+    kospi_institutional_net_buy,
+    kospi_individual_net_buy,
+    kosdaq_foreign_net_buy,
+    kosdaq_institutional_net_buy,
+    kosdaq_individual_net_buy
+from normalized_global_macro_daily;

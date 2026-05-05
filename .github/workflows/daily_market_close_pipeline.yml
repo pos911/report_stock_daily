@@ -1,0 +1,31 @@
+name: Daily Market Close Pipeline
+
+on:
+  schedule:
+    - cron: "20 7 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  collect-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Inject runtime secrets
+        env:
+          API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
+        run: |
+          python - <<'PY'
+          import json, os
+          payload = json.loads(os.environ["API_KEYS_JSON"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"SUPABASE_URL={payload['supabase']['url']}\n")
+              env_file.write(f"SUPABASE_SERVICE_ROLE_KEY={payload['supabase']['service_role_key']}\n")
+              env_file.write(f"KIS_APP_KEY={payload['kis']['app_key']}\n")
+              env_file.write(f"KIS_APP_SECRET={payload['kis']['app_secret']}\n")
+          PY
+      - run: python src/jobs/run_daily_stock_pipeline.py
+      - run: python scripts/verify_data.py

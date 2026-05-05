@@ -1305,6 +1305,74 @@ class SupabaseReader:
             pivoted[symbol]["available_at"] = row.get("available_at")
         return pivoted
 
+    def fetch_report_watchlist_snapshot_view(self):
+        try:
+            response = (
+                self.client.table("report_watchlist_snapshot_view")
+                .select("*")
+                .order("symbol")
+                .limit(2000)
+                .execute()
+            )
+            return response.data or []
+        except Exception as exc:
+            print(f"[WARNING] fetch_report_watchlist_snapshot_view failed: {exc}")
+            return []
+
+    @staticmethod
+    def _view_rows_to_watchlist_snapshots(rows: list[dict]) -> list[dict]:
+        snapshots = []
+        for row in rows or []:
+            symbol = canonicalize_symbol(row.get("symbol"))
+            if not symbol:
+                continue
+            snapshots.append(
+                {
+                    "symbol": symbol,
+                    "name": row.get("name") or symbol,
+                    "market": normalize_market_label(row.get("market")),
+                    "source_category": "watchlist",
+                    "price": {
+                        "symbol": symbol,
+                        "base_date": row.get("base_date"),
+                        "close_price": row.get("close_price"),
+                        "trading_value": row.get("trading_value"),
+                    },
+                    "supply": {
+                        "symbol": symbol,
+                        "base_date": row.get("base_date"),
+                        "foreign_net_buy": row.get("foreign_net_buy"),
+                        "institutional_net_buy": row.get("institutional_net_buy"),
+                        "individual_net_buy": row.get("individual_net_buy"),
+                        "foreign_holding_ratio": row.get("foreign_holding_ratio"),
+                    },
+                    "fundamentals": {
+                        "symbol": symbol,
+                        "base_date": row.get("base_date"),
+                        "per": row.get("per"),
+                        "pbr": row.get("pbr"),
+                        "roe": row.get("roe"),
+                        "debt_ratio": row.get("debt_ratio"),
+                    },
+                    "short_selling": {
+                        "symbol": symbol,
+                        "base_date": row.get("base_date"),
+                        "short_ratio": row.get("short_ratio"),
+                        "short_value": row.get("short_value"),
+                    },
+                    "features": {
+                        "base_date": row.get("base_date"),
+                        "return_5d": row.get("return_5d"),
+                        "return_20d": row.get("return_20d"),
+                        "return_60d": row.get("return_60d"),
+                        "trading_value_ratio_20d": row.get("trading_value_ratio_20d"),
+                    },
+                    "event": {},
+                    "data_status": row.get("data_status"),
+                }
+            )
+        return snapshots
+
     def fetch_latest_stock_events(self, symbols):
         columns = "symbol, base_date, event_type, event_score, sentiment_score, available_at"
         return self._pick_latest_rows_by_symbol(
@@ -1716,15 +1784,26 @@ class SupabaseReader:
         return rows
 
     def get_watchlist_snapshots(self, report_date: str | None = None):
-        latest_valid_price = self.get_latest_valid_price_date(report_date, lookback_days=7)
-        snapshots = self.fetch_static_universe_stock_snapshot(price_base_date=latest_valid_price.get("base_date"))
+        view_rows = self.fetch_report_watchlist_snapshot_view()
+        if view_rows:
+            latest_view_date = max((row.get("base_date") for row in view_rows if row.get("base_date")), default=None)
+            snapshots = self._view_rows_to_watchlist_snapshots(view_rows)
+            price_meta = {
+                "base_date": latest_view_date,
+                "valid_rows": len([row for row in view_rows if row.get("close_price") not in (None, "")]),
+                "total_rows": len(view_rows),
+                "source": "report_watchlist_snapshot_view",
+            }
+        else:
+            price_meta = self.get_latest_valid_price_date(report_date, lookback_days=7)
+            snapshots = self.fetch_static_universe_stock_snapshot(price_base_date=price_meta.get("base_date"))
         for snapshot in snapshots:
             snapshot["source_category"] = "watchlist"
-            snapshot["selected_price_base_date"] = latest_valid_price.get("base_date")
+            snapshot["selected_price_base_date"] = price_meta.get("base_date")
         return {
-            "price_base_date": latest_valid_price.get("base_date"),
+            "price_base_date": price_meta.get("base_date"),
             "snapshots": snapshots,
-            "price_meta": latest_valid_price,
+            "price_meta": price_meta,
         }
 
     def fetch_price_rows_by_date(self, base_date: str):

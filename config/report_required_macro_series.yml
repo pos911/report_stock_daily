@@ -1,0 +1,154 @@
+- symbol: "SP500"
+  series_id: "SP500"
+  name: "S&P500"
+  market: "US"
+  role: "primary"
+  is_active: true
+  notes: "Morning macro contract."
+- symbol: "NASDAQ"
+  series_id: "NASDAQ"
+  name: "Nasdaq"
+  market: "US"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "SOX"
+  series_id: "SOX"
+  name: "SOX"
+  market: "US"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "VIX"
+  series_id: "VIX"
+  name: "VIX"
+  market: "US"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "USDKRW"
+  series_id: "USDKRW"
+  name: "USDKRW"
+  market: "FX"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "DXY"
+  series_id: "DXY"
+  name: "DXY"
+  market: "FX"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "US10Y"
+  series_id: "US10Y"
+  name: "US10Y"
+  market: "Rates"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "US3Y"
+  series_id: "US3Y"
+  name: "US3Y"
+  market: "Rates"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KR10Y"
+  series_id: "KR10Y"
+  name: "KR10Y"
+  market: "Rates"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "BRENT"
+  series_id: "BRENT"
+  name: "Brent"
+  market: "Commodities"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "WTI"
+  series_id: "WTI"
+  name: "WTI"
+  market: "Commodities"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "GOLD"
+  series_id: "GOLD"
+  name: "Gold"
+  market: "Commodities"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "COPPER"
+  series_id: "COPPER"
+  name: "Copper"
+  market: "Commodities"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "HY_SPREAD"
+  series_id: "HY_SPREAD"
+  name: "HY Spread"
+  market: "Credit"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSPI"
+  series_id: "KOSPI"
+  name: "KOSPI"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSDAQ"
+  series_id: "KOSDAQ"
+  name: "KOSDAQ"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSPI_FOREIGN_NET_BUY"
+  series_id: "KOSPI_FOREIGN_NET_BUY"
+  name: "KOSPI Foreign Net Buy"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSPI_INSTITUTIONAL_NET_BUY"
+  series_id: "KOSPI_INSTITUTIONAL_NET_BUY"
+  name: "KOSPI Institutional Net Buy"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSPI_INDIVIDUAL_NET_BUY"
+  series_id: "KOSPI_INDIVIDUAL_NET_BUY"
+  name: "KOSPI Individual Net Buy"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSDAQ_FOREIGN_NET_BUY"
+  series_id: "KOSDAQ_FOREIGN_NET_BUY"
+  name: "KOSDAQ Foreign Net Buy"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSDAQ_INSTITUTIONAL_NET_BUY"
+  series_id: "KOSDAQ_INSTITUTIONAL_NET_BUY"
+  name: "KOSDAQ Institutional Net Buy"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:
+- symbol: "KOSDAQ_INDIVIDUAL_NET_BUY"
+  series_id: "KOSDAQ_INDIVIDUAL_NET_BUY"
+  name: "KOSDAQ Individual Net Buy"
+  market: "KR"
+  role: "primary"
+  is_active: true
+  notes:

@@ -1,19 +1,14 @@
 """
-scripts/verify_data.py
-=======================
-데이터 적재 정합성 검증 스크립트.
+Verify report-consumption data readiness.
 
-- normalized_stock_prices_daily 기준 최신 base_date 확인
-- 3개 신규 종목(277470, 071050, 012330) 포함 여부 확인
-- normalized_macro_series 내 KOSPI/KOSDAQ 최신 적재 확인
-
-Usage:
-    $env:PYTHONPATH="."; python scripts/verify_data.py
-    $env:PYTHONPATH="."; python scripts/verify_data.py --date 2026-04-23
+This script focuses on report-required coverage rather than broad ingestion.
 """
 
+from __future__ import annotations
+
 import argparse
-import datetime
+import datetime as dt
+import json
 import sys
 from pathlib import Path
 
@@ -21,261 +16,171 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
 from supabase import create_client
+
 from src.utils import config
-
-CHECK_DATE_DEFAULT = "2026-04-23"
-TARGET_SYMBOLS = ["277470", "071050", "012330"]
-INDEX_SERIES   = ["^KS", "^KQ"]
-
-PRICE_TABLE    = "normalized_stock_prices_daily"
-SUPPLY_TABLE   = "normalized_stock_supply_daily"
-SHORT_TABLE    = "normalized_stock_short_selling"
-FUND_TABLE     = "normalized_stock_fundamentals_ratios"
-MACRO_TABLE    = "normalized_macro_series"
-MASTER_TABLE   = "stocks_master"
+from src.utils.report_universe import (
+    active_symbols,
+    classify_overall_status,
+    evaluate_etf_coverage,
+    evaluate_macro_freshness,
+    evaluate_raw_retention,
+    evaluate_watchlist_coverage,
+    load_report_required_etf_universe,
+    load_report_required_macro_series,
+    load_report_required_stock_universe,
+)
 
 
 def _client():
-    url = config.get("url", section="supabase")
-    key = config.get("service_role_key", section="supabase")
-    return create_client(url, key)
+    return create_client(
+        config.get("url", section="supabase"),
+        config.get("service_role_key", section="supabase"),
+    )
 
 
-def check_price_latest(client, check_date: str) -> dict:
-    """normalized_stock_prices_daily 최신일 및 대상 종목 포함 여부 확인."""
-    result = {"status": "OK", "issues": []}
+def fetch_view_rows(client, view_name: str) -> list[dict]:
+    try:
+        response = client.table(view_name).select("*").limit(5000).execute()
+        return response.data or []
+    except Exception:
+        return []
 
-    # 1) 전체 최신 base_date
-    resp = (
-        client.table(PRICE_TABLE)
-        .select("base_date")
+
+def fetch_latest_macro_rows(client, series_ids: list[str]) -> list[dict]:
+    rows = []
+    for series_id in series_ids:
+        try:
+            response = (
+                client.table("normalized_macro_series")
+                .select("series_id, base_date, value")
+                .eq("series_id", series_id)
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            response = (
+                client.table("normalized_global_macro_daily")
+                .select("base_date")
+                .order("base_date", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                rows.append({"series_id": series_id, "base_date": response.data[0]["base_date"]})
+            continue
+        if response.data:
+            rows.append(response.data[0])
+    return rows
+
+
+def fetch_watchlist_rows(client, symbols: list[str], table_name: str) -> list[dict]:
+    if not symbols:
+        return []
+    response = (
+        client.table(table_name)
+        .select("symbol, base_date")
+        .in_("symbol", symbols)
         .order("base_date", desc=True)
-        .limit(1)
+        .limit(5000)
         .execute()
     )
-    latest = resp.data[0]["base_date"] if resp.data else None
-    result["latest_base_date"] = latest
-
-    if not latest:
-        result["status"] = "FAIL"
-        result["issues"].append("테이블이 비어있습니다.")
-        return result
-
-    # 2) 기준일 데이터 존재 여부
-    if latest < check_date:
-        result["status"] = "WARN"
-        result["issues"].append(
-            f"최신 base_date({latest})가 체크 기준일({check_date})보다 오래됨."
-        )
-
-    # 3) 대상 종목별 확인
-    symbol_status = {}
-    for sym in TARGET_SYMBOLS:
-        sym_resp = (
-            client.table(PRICE_TABLE)
-            .select("base_date, close_price, volume")
-            .eq("symbol", sym)
-            .order("base_date", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if sym_resp.data:
-            row = sym_resp.data[0]
-            symbol_status[sym] = {
-                "latest_date": row["base_date"],
-                "close":       row.get("close_price"),
-                "volume":      row.get("volume"),
-                "up_to_date":  row["base_date"] >= check_date,
-            }
-        else:
-            symbol_status[sym] = {"latest_date": None, "up_to_date": False}
-            result["status"] = "FAIL"
-            result["issues"].append(f"{sym}: 가격 데이터 없음")
-
-    result["symbol_status"] = symbol_status
-    return result
+    rows = response.data or []
+    latest_by_symbol = {}
+    for row in rows:
+        symbol = row.get("symbol")
+        if symbol and symbol not in latest_by_symbol:
+            latest_by_symbol[symbol] = row
+    return list(latest_by_symbol.values())
 
 
-def check_supply(client, check_date: str) -> dict:
-    result = {"status": "OK", "issues": []}
-    for sym in TARGET_SYMBOLS:
+def fetch_raw_oldest_dates(client, table_names: list[str]) -> dict[str, str | None]:
+    oldest = {}
+    for table_name in table_names:
         try:
-            resp = (
-                client.table(SUPPLY_TABLE)
-                .select("base_date, investor_type, net_buy_vol")
-                .eq("symbol", sym)
-                .order("base_date", desc=True)
+            date_column = "created_at" if table_name == "pipeline_run_logs" else "base_date"
+            response = (
+                client.table(table_name)
+                .select(date_column)
+                .order(date_column)
                 .limit(1)
                 .execute()
             )
+            oldest[table_name] = response.data[0][date_column][:10] if response.data else None
         except Exception:
-            # Fallback to wide format
-            resp = (
-                client.table(SUPPLY_TABLE)
-                .select("base_date, individual_net_buy, foreign_net_buy")
-                .eq("symbol", sym)
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
-            )
-        if not resp.data:
-            result["status"] = "WARN"
-            result["issues"].append(f"{sym}: 수급 데이터 없음")
-    return result
+            oldest[table_name] = None
+    return oldest
 
 
-def check_short_selling(client, check_date: str) -> dict:
-    result = {"status": "OK", "issues": []}
-    for sym in TARGET_SYMBOLS:
-        try:
-            resp = (
-                client.table(SHORT_TABLE)
-                .select("base_date, short_volume")
-                .eq("symbol", sym)
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
-            )
-        except Exception:
-            resp = (
-                client.table(SHORT_TABLE)
-                .select("base_date, short_sell_volume")
-                .eq("symbol", sym)
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
-            )
-        if not resp.data:
-            result["status"] = "WARN"
-            result["issues"].append(f"{sym}: 공매도 데이터 없음")
-    return result
+def build_verification_report(check_date: str) -> dict:
+    client = _client()
+    required_stocks = load_report_required_stock_universe(project_root)
+    required_etfs = load_report_required_etf_universe(project_root)
+    required_macro = load_report_required_macro_series(project_root)
 
+    etf_view_rows = fetch_view_rows(client, "report_sector_etf_signal_view")
+    watchlist_view_rows = fetch_view_rows(client, "report_watchlist_snapshot_view")
+    freshness_rows = fetch_view_rows(client, "report_data_freshness_view")
+    ranking_rows = fetch_view_rows(client, "report_market_ranking_view")
 
-def check_fundamentals(client, check_date: str) -> dict:
-    result = {"status": "OK", "issues": []}
-    for sym in TARGET_SYMBOLS:
-        resp = (
-            client.table(FUND_TABLE)
-            .select("base_date, per, pbr")
-            .eq("symbol", sym)
-            .order("base_date", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not resp.data:
-            result["status"] = "WARN"
-            result["issues"].append(f"{sym}: 펀더멘털 데이터 없음")
-        else:
-            row = resp.data[0]
-            result[sym] = {"date": row["base_date"], "per": row.get("per"), "pbr": row.get("pbr")}
-    return result
-
-
-def check_macro_index(client, check_date: str) -> dict:
-    result = {"status": "OK", "issues": []}
-    for series_id in INDEX_SERIES:
-        try:
-            resp = (
-                client.table(MACRO_TABLE)
-                .select("base_date, close_val")
-                .eq("series_id", series_id)
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
-            )
-            col = "close_val"
-        except Exception:
-            resp = (
-                client.table(MACRO_TABLE)
-                .select("base_date, value")
-                .eq("series_id", series_id)
-                .order("base_date", desc=True)
-                .limit(1)
-                .execute()
-            )
-            col = "value"
-        
-        if resp.data:
-            row = resp.data[0]
-            result[series_id] = {"latest_date": row["base_date"], "value": row.get(col)}
-            if row["base_date"] < check_date:
-                result["status"] = "WARN"
-                result["issues"].append(
-                    f"{series_id}: 최신일({row['base_date']}) < 체크기준일({check_date})"
-                )
-        else:
-            result["status"] = "FAIL"
-            result["issues"].append(f"{series_id}: 데이터 없음")
-    return result
-
-
-def check_master(client) -> dict:
-    result = {"status": "OK", "issues": []}
-    resp = (
-        client.table(MASTER_TABLE)
-        .select("symbol, name, market, is_active")
-        .in_("symbol", TARGET_SYMBOLS)
-        .execute()
+    etf_result = evaluate_etf_coverage(required_etfs, etf_view_rows, stale_warn_days=3)
+    macro_result = evaluate_macro_freshness(
+        required_macro,
+        fetch_latest_macro_rows(client, [row.get("series_id") or row["symbol"] for row in required_macro]),
+        check_date,
     )
-    found = {r["symbol"]: r for r in (resp.data or [])}
-    for sym in TARGET_SYMBOLS:
-        if sym not in found:
-            result["status"] = "WARN"
-            result["issues"].append(f"{sym}: stocks_master 에 없음")
-        else:
-            result[sym] = found[sym]
-    return result
+    watchlist_symbols = active_symbols(required_stocks)
+    watchlist_result = evaluate_watchlist_coverage(
+        watchlist_symbols,
+        watchlist_view_rows or fetch_watchlist_rows(client, watchlist_symbols, "normalized_stock_prices_daily"),
+        fetch_watchlist_rows(client, watchlist_symbols, "normalized_stock_supply_daily"),
+    )
+    ranking_latest = max((row.get("base_date") for row in ranking_rows if row.get("base_date")), default=None)
+    ranking_result = {
+        "status": "FAIL" if not ranking_latest else "WARN" if ranking_latest < check_date else "PASS",
+        "latest_base_date": ranking_latest,
+    }
+    raw_retention_result = evaluate_raw_retention(
+        check_date,
+        fetch_raw_oldest_dates(
+            client,
+            ["raw_stock_prices_daily", "raw_market_rankings", "raw_macro", "pipeline_run_logs"],
+        ),
+    )
+
+    exclusion_violations = [
+        row["symbol"]
+        for row in etf_view_rows
+        if row.get("exclude_from_signal") is False and str(row.get("symbol")) in {item["symbol"] for item in required_etfs if item.get("exclude_from_signal")}
+    ]
+    exclusion_result = {
+        "status": "FAIL" if exclusion_violations else "PASS",
+        "violations": exclusion_violations,
+    }
+
+    results = {
+        "etf_coverage": etf_result,
+        "macro_freshness": macro_result,
+        "watchlist_coverage": watchlist_result,
+        "ranking_freshness": ranking_result,
+        "raw_retention": raw_retention_result,
+        "signal_exclusion": exclusion_result,
+        "freshness_view_rows": freshness_rows,
+    }
+    results["overall_status"] = classify_overall_status(results.values())
+    return results
 
 
-def _status_icon(status: str) -> str:
-    return {"OK": "✅", "WARN": "⚠️", "FAIL": "❌"}.get(status, "❓")
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Verify report-oriented StockData readiness")
+    parser.add_argument("--date", default=dt.date.today().isoformat())
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Data Integrity Verifier")
-    parser.add_argument("--date", default=CHECK_DATE_DEFAULT, help="검증 기준일 YYYY-MM-DD")
-    args = parser.parse_args()
-    check_date = args.date
-
-    print(f"\n{'='*60}")
-    print(f"  데이터 정합성 검증 리포트")
-    print(f"  기준일: {check_date}  /  대상 종목: {TARGET_SYMBOLS}")
-    print(f"{'='*60}\n")
-
-    client = _client()
-    overall_ok = True
-
-    checks = [
-        ("stocks_master",              check_master(client)),
-        ("가격 (prices_daily)",         check_price_latest(client, check_date)),
-        ("수급 (supply_daily)",         check_supply(client, check_date)),
-        ("공매도 (short_selling)",      check_short_selling(client, check_date)),
-        ("펀더멘털 (fundamentals)",     check_fundamentals(client, check_date)),
-        ("지수 (macro_series KOSPI/Q)", check_macro_index(client, check_date)),
-    ]
-
-    for label, res in checks:
-        icon = _status_icon(res["status"])
-        print(f"{icon}  [{res['status']}] {label}")
-        issues = res.get("issues", [])
-        for issue in issues:
-            print(f"      → {issue}")
-        if res["status"] != "OK":
-            overall_ok = False
-        # 상세 정보 출력
-        for sym in TARGET_SYMBOLS:
-            if sym in res:
-                print(f"      {sym}: {res[sym]}")
-        for idx in INDEX_SERIES:
-            if idx in res:
-                print(f"      {idx}: {res[idx]}")
-        print()
-
-    print("─" * 60)
-    if overall_ok:
-        print("✅  전체 검증 통과 — 데이터 정합성 OK\n")
-    else:
-        print("⚠️  일부 항목 검증 실패 — 위 내용을 확인하세요\n")
+    args = _parse_args()
+    report = build_verification_report(args.date)
+    print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":
