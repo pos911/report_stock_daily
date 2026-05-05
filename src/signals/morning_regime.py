@@ -2,6 +2,21 @@ from __future__ import annotations
 
 from typing import Any
 
+SANITY_RANGES = {
+    "sp500": (1000, 10000),
+    "nasdaq": (5000, 40000),
+    "sox": (500, 20000),
+    "vix": (5, 80),
+    "usdkrw": (800, 2500),
+    "dxy": (70, 150),
+    "us10y": (0, 10),
+    "us3y": (0, 10),
+    "brent": (20, 200),
+    "wti": (10, 200),
+    "kospi": (1000, 10000),
+    "kosdaq": (300, 3000),
+}
+
 
 def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     score = 0.0
@@ -9,6 +24,7 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     negative_drivers: list[str] = []
     neutral_drivers: list[str] = []
     warnings: list[str] = []
+    warnings.extend(str(item) for item in (macro_snapshot.get("warnings") or []))
 
     us_weight = 0.5 if (not freshness.get("xnys_is_open") or freshness.get("carry_forward_fields")) else 1.0
 
@@ -35,12 +51,22 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
         else:
             neutral_drivers.append(f"{label} {numeric:+.2f}")
 
-    add_driver("S&P500 change", macro_snapshot.get("sp500_change_rate"), 0.005, -0.005, 1.0, -1.0, us_weight)
-    add_driver("Nasdaq change", macro_snapshot.get("nasdaq_change_rate"), 0.007, -0.007, 1.0, -1.0, us_weight)
-    add_driver("SOX change", macro_snapshot.get("sox_change_rate"), 0.01, -0.01, 2.0, -2.0, us_weight)
+    sp500_usable = _metric_usable("sp500", macro_snapshot, warnings)
+    nasdaq_usable = _metric_usable("nasdaq", macro_snapshot, warnings)
+    sox_usable = _metric_usable("sox", macro_snapshot, warnings)
+    vix_usable = _metric_usable("vix", macro_snapshot, warnings)
+    usdkrw_usable = _metric_usable("usdkrw", macro_snapshot, warnings)
+    dxy_usable = _metric_usable("dxy", macro_snapshot, warnings)
+    us10y_usable = _metric_usable("us10y", macro_snapshot, warnings)
+    us3y_usable = _metric_usable("us3y", macro_snapshot, warnings)
+    brent_usable = _metric_usable("brent", macro_snapshot, warnings)
 
-    vix_level = _to_float(macro_snapshot.get("vix"))
-    vix_change = _to_float(macro_snapshot.get("vix_change_rate"))
+    add_driver("S&P500 change", _sanitize_change_rate("sp500", macro_snapshot.get("sp500_change_rate"), warnings) if sp500_usable else None, 0.005, -0.005, 1.0, -1.0, us_weight)
+    add_driver("Nasdaq change", _sanitize_change_rate("nasdaq", macro_snapshot.get("nasdaq_change_rate"), warnings) if nasdaq_usable else None, 0.007, -0.007, 1.0, -1.0, us_weight)
+    add_driver("SOX change", _sanitize_change_rate("sox", macro_snapshot.get("sox_change_rate"), warnings) if sox_usable else None, 0.01, -0.01, 2.0, -2.0, us_weight)
+
+    vix_level = _sanitize_value("vix", macro_snapshot.get("vix"), warnings) if "vix" in macro_snapshot else None
+    vix_change = _sanitize_change_rate("vix", macro_snapshot.get("vix_change_rate"), warnings) if vix_usable else None
     if vix_level is None and vix_change is None:
         warnings.append("VIX missing")
     elif (vix_level is not None and vix_level <= 15) or (vix_change is not None and vix_change <= -0.05):
@@ -52,7 +78,7 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     else:
         neutral_drivers.append("VIX neutral")
 
-    usdkrw_change = _to_float(macro_snapshot.get("usdkrw_change_rate"))
+    usdkrw_change = _sanitize_change_rate("usdkrw", macro_snapshot.get("usdkrw_change_rate"), warnings) if usdkrw_usable else None
     if usdkrw_change is None:
         warnings.append("USDKRW change missing")
     elif usdkrw_change <= -0.003:
@@ -64,7 +90,7 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     else:
         neutral_drivers.append(f"USDKRW {usdkrw_change:+.2%}")
 
-    dxy_change = _to_float(macro_snapshot.get("dxy_change_rate"))
+    dxy_change = _sanitize_change_rate("dxy", macro_snapshot.get("dxy_change_rate"), warnings) if dxy_usable else None
     if dxy_change is None:
         warnings.append("DXY change missing")
     elif dxy_change <= -0.003:
@@ -76,7 +102,7 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     else:
         neutral_drivers.append(f"DXY {dxy_change:+.2%}")
 
-    us10y_bp = _to_float(macro_snapshot.get("us10y_change_bp"))
+    us10y_bp = _to_float(macro_snapshot.get("us10y_change_bp")) if us10y_usable else None
     if us10y_bp is None:
         warnings.append("US10Y change missing")
     elif us10y_bp <= -5:
@@ -88,7 +114,7 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     else:
         neutral_drivers.append(f"US10Y {us10y_bp:+.1f}bp")
 
-    us3y_bp = _to_float(macro_snapshot.get("us3y_change_bp"))
+    us3y_bp = _to_float(macro_snapshot.get("us3y_change_bp")) if us3y_usable else None
     if us3y_bp is None:
         warnings.append("US3Y change missing")
     elif us3y_bp <= -5:
@@ -100,7 +126,7 @@ def build_global_morning_regime(macro_snapshot: dict, freshness: dict) -> dict:
     else:
         neutral_drivers.append(f"US3Y {us3y_bp:+.1f}bp")
 
-    brent_change = _to_float(macro_snapshot.get("brent_change_rate"))
+    brent_change = _sanitize_change_rate("brent", macro_snapshot.get("brent_change_rate"), warnings) if brent_usable else None
     if brent_change is None:
         warnings.append("Brent missing")
     elif brent_change >= 0.02:
@@ -193,3 +219,33 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _sanitize_value(field: str, value: Any, warnings: list[str]) -> float | None:
+    numeric = _to_float(value)
+    if numeric is None:
+        return None
+    if field == "usdkrw" and numeric <= 0:
+        warnings.append("usdkrw invalid")
+        return None
+    lower, upper = SANITY_RANGES.get(field, (None, None))
+    if lower is not None and (numeric < lower or numeric > upper):
+        warnings.append(f"{field} out of sanity range")
+        return None
+    return numeric
+
+
+def _sanitize_change_rate(field: str, value: Any, warnings: list[str]) -> float | None:
+    numeric = _to_float(value)
+    if numeric is None:
+        return None
+    if abs(numeric) > 0.10:
+        warnings.append(f"{field} change rate anomaly")
+        return None
+    return numeric
+
+
+def _metric_usable(field: str, macro_snapshot: dict, warnings: list[str]) -> bool:
+    if field not in macro_snapshot:
+        return True
+    return _sanitize_value(field, macro_snapshot.get(field), warnings) is not None

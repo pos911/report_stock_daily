@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 .env
 .venv
@@ -8,6 +9,8 @@ env/
 venv/
 build/
 dist/
+outputs/
+reports/daily_quant_report_*.md
 
 # Configuration
 config/api_keys.json

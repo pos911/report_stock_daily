@@ -200,9 +200,11 @@ class MorningReportTests(unittest.TestCase):
         lines = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"].splitlines()
         idx = lines.index("2. 오늘의 한 줄 판단")
         sentence = lines[idx + 1]
-        self.assertIn("글로벌 지표", sentence)
-        self.assertIn("ETF", sentence)
-        self.assertTrue("수급" in sentence or "리스크" in sentence)
+        self.assertLessEqual(len([part for part in sentence.split(". ") if part.strip()]), 3)
+        self.assertIn("다음 거래일", sentence)
+        self.assertNotIn("ETF 1일 모멘텀", sentence)
+        self.assertNotIn("ETF 20일 추세", sentence)
+        self.assertNotIn("오늘 직접 대응", sentence)
 
     def test_global_market_section_is_not_empty(self):
         text = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"]
@@ -211,7 +213,7 @@ class MorningReportTests(unittest.TestCase):
 
     def test_watchlist_section_renders_at_least_three_names(self):
         text = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"]
-        self.assertGreaterEqual(text.count("- 장전 판단:"), 3)
+        self.assertGreaterEqual(text.count("- 다음 거래일 참고 판단:"), 3)
         self.assertIn("관심종목 5개 중 주요 5개 표시. 나머지 0개는 snapshot에 저장합니다.", text)
 
     def test_watchlist_display_and_snapshot_split_for_17_names(self):
@@ -250,19 +252,24 @@ class MorningReportTests(unittest.TestCase):
 
     def test_holiday_report_removes_live_intraday_checkpoints(self):
         text = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"]
-        self.assertIn("한국장 휴장으로 장중 체크포인트는 없습니다.", text)
+        self.assertIn("8. 다음 거래일 확인 포인트", text)
+        self.assertIn("휴장으로 실시간 대응 없음", text)
         for banned in [
+            "장전 판단",
+            "장중 체크포인트",
+            "시가 직후",
             "09:30 외국인 KOSPI200 선물 방향",
             "10:30 주도 섹터 거래대금 유지 여부",
             "12:30 아침 주도 테마 유지 여부",
             "장 초반 급등 후 이익실현 여부 확인",
+            "오늘 직접 대응",
         ]:
             self.assertNotIn(banned, text)
 
     def test_holiday_one_line_judgment_is_cautious(self):
         lines = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"].splitlines()
         sentence = lines[lines.index("2. 오늘의 한 줄 판단") + 1]
-        self.assertIn("한국장은 휴장입니다.", sentence)
+        self.assertIn("한국장은 휴장", sentence)
         self.assertIn("다음 거래일", sentence)
 
     def test_sentence_join_quality(self):
@@ -270,6 +277,14 @@ class MorningReportTests(unittest.TestCase):
         self.assertNotIn("입니다.가", text)
         self.assertNotIn("습니다.로", text)
         self.assertNotIn("; ", text)
+
+    def test_watchlist_evidence_and_interpretation_are_not_identical(self):
+        text = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"]
+        self.assertNotIn("- 퀀트 근거: 정량 해석 제한", text)
+        lines = text.splitlines()
+        evidence = next(line for line in lines if line.startswith("- 퀀트 근거:"))
+        positive = next(line for line in lines if line.startswith("- 우호 요인:"))
+        self.assertNotEqual(evidence, positive)
 
     def test_watchlist_empty_warning_is_rendered(self):
         bundle = self._bundle()

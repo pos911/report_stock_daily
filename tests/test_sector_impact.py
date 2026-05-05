@@ -12,6 +12,7 @@ class SectorImpactTests(unittest.TestCase):
             [],
         )
         self.assertEqual(impacts[0]["label"], "우호")
+        self.assertIn("%", impacts[0]["etf_reason"])
 
     def test_stale_shipbuilding_etf_excludes_etf_weight(self):
         impacts = build_sector_morning_impacts(
@@ -22,6 +23,7 @@ class SectorImpactTests(unittest.TestCase):
         )
         self.assertIn("stale", " ".join(impacts[0]["warnings"]).lower())
         self.assertEqual(impacts[0]["data_status"], "STALE")
+        self.assertIn("stale", impacts[0]["etf_reason"].lower())
 
     def test_leverage_etf_is_excluded_from_primary_score(self):
         impacts = build_sector_morning_impacts(
@@ -32,6 +34,7 @@ class SectorImpactTests(unittest.TestCase):
         )
         self.assertIn("Excluded", " ".join(impacts[0]["warnings"]))
         self.assertNotEqual(impacts[0]["label"], "우호")
+        self.assertNotIn("단기 가격 흐름", impacts[0]["etf_reason"])
 
     def test_fresh_primary_beats_fresh_leverage_reference(self):
         impacts = build_sector_morning_impacts(

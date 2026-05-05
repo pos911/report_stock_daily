@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 
 from src.utils.formatters import NA_TEXT
 
@@ -24,6 +25,24 @@ SECTOR_NAME_MAP = {
     "Aerospace": "항공우주",
     "Internet": "인터넷",
     "Utilities": "유틸리티",
+    "반도체": "반도체",
+    "반도체 장비": "반도체 장비",
+    "2차전지": "2차전지",
+    "조선": "조선",
+    "방산": "방산",
+    "금융/증권": "금융/증권",
+    "바이오/헬스케어": "바이오/헬스케어",
+    "화장품/소비재": "화장품/소비재",
+    "자동차": "자동차",
+    "AI전력/인프라": "AI전력/인프라",
+    "정유화학": "정유화학",
+    "원자력": "원자력",
+    "로봇": "로봇",
+    "통신": "통신",
+    "게임": "게임",
+    "항공우주": "항공우주",
+    "인터넷/플랫폼": "인터넷/플랫폼",
+    "전력/유틸리티": "전력/유틸리티",
 }
 
 STOCK_NAME_MAP = {
@@ -57,28 +76,7 @@ def build_data_status_section(freshness: dict, bundle: dict) -> list[str]:
 
 
 def build_one_line_judgment_section(regime: dict, top_sectors: list[dict], freshness: dict) -> list[str]:
-    tone = regime.get("market_tone") or "데이터 부족"
-    leading_sector = top_sectors[0] if top_sectors else {}
-    leading_sector_name = _display_sector_name(leading_sector.get("sector_group"))
-    global_clause = _build_global_clause(regime)
-    etf_clause = _build_etf_clause(leading_sector)
-    flow_clause = _build_flow_or_risk_clause(top_sectors, freshness, regime)
-
-    if not freshness.get("xkrx_is_open"):
-        opening = "한국장은 휴장입니다. 오늘 직접 대응보다 다음 거래일 시나리오를 점검하는 편이 더 중요합니다."
-    elif freshness.get("missing_required_data") or bundle_warns(freshness):
-        opening = f"오늘 한국장은 {tone} 쪽으로 보되 단정적으로 해석하기보다 보수적으로 접근할 필요가 있습니다."
-    else:
-        opening = f"오늘 한국장은 {tone} 쪽에 가깝습니다."
-
-    if freshness.get("carry_forward_fields") and not freshness.get("xnys_is_open"):
-        opening += " 미국 지표는 직전 거래일 기준으로 해석해야 합니다."
-
-    details = [clause for clause in [global_clause, etf_clause, flow_clause] if clause]
-    if leading_sector_name != "미확인" and not freshness.get("xkrx_is_open"):
-        details.insert(1, f"다음 거래일 우선 관찰 테마는 {leading_sector_name}입니다.")
-    sentence = " ".join([opening] + details[:4]).strip()
-    return ["2. 오늘의 한 줄 판단", sentence]
+    return ["2. 오늘의 한 줄 판단", _summarize_morning_view(regime, top_sectors, freshness)]
 
 
 def build_global_market_section(macro: dict) -> list[str]:
@@ -127,13 +125,15 @@ def build_priority_themes_section(top_sectors: list[dict], freshness: dict) -> l
         lines.append(f"- 모멘텀: {_joined_text(row.get('leading_stock_reason'))}")
         lines.append(f"- 수급: {_investor_reason_text(row.get('investor_reason'))}")
         lines.append(f"- 리스크: {_joined_text(row.get('risk'))}")
-        lines.append(f"- 장중 체크포인트: {_checkpoint_text(row.get('intraday_checkpoints') or ['09:30 거래대금 확인'], freshness)}")
+        label = "다음 거래일 확인 포인트" if not freshness.get("xkrx_is_open") else "장중 체크포인트"
+        lines.append(f"- {label}: {_checkpoint_text(row.get('intraday_checkpoints') or ['09:30 거래대금 확인'], freshness)}")
         lines.append(f"- 데이터 상태: {row.get('data_status') or NA_TEXT}")
     return lines
 
 
 def build_watchlist_section(watchlist_scores: list[dict], freshness: dict) -> list[str]:
-    lines = ["6. 관심종목 장전 점검"]
+    title = "6. 관심종목 장전 점검" if freshness.get("xkrx_is_open") else "6. 관심종목 다음 거래일 점검"
+    lines = [title]
     if not watchlist_scores:
         lines.append("- WARNING: watchlist empty")
         return lines
@@ -143,33 +143,44 @@ def build_watchlist_section(watchlist_scores: list[dict], freshness: dict) -> li
     lines.append(f"- 관심종목 {len(watchlist_scores)}개 중 주요 {display_count}개 표시. 나머지 {remaining}개는 snapshot에 저장합니다.")
     for row in watchlist_scores[:display_count]:
         lines.append(f"{_display_stock_name(row.get('symbol'), row.get('name'))}({row.get('symbol')})")
-        lines.append(f"- 장전 판단: {row.get('label')}")
+        decision_label = "다음 거래일 참고 판단" if not freshness.get("xkrx_is_open") else "장전 판단"
+        checkpoint_label = "다음 거래일 확인 포인트" if not freshness.get("xkrx_is_open") else "장중 체크포인트"
+        lines.append(f"- {decision_label}: {row.get('label')}")
         lines.append(f"- 퀀트 근거: {_joined_items(row.get('quant_reasons') or ['데이터 부족'])}")
         lines.append(f"- 우호 요인: {_joined_items((row.get('positive_factors') or ['없음'])[:3])}")
         lines.append(f"- 부담 요인: {_joined_items((row.get('negative_factors') or ['없음'])[:3])}")
-        lines.append(f"- 장중 체크포인트: {_checkpoint_text(row.get('intraday_checkpoints') or ['09:30 거래대금 확인'], freshness)}")
+        lines.append(f"- {checkpoint_label}: {_checkpoint_text(row.get('intraday_checkpoints') or ['09:30 거래대금 확인'], freshness)}")
     return lines
 
 
 def build_risk_section(regime: dict, top_sectors: list[dict], watchlist_scores: list[dict], freshness: dict) -> list[str]:
     lines = ["7. 오늘의 리스크"]
-    risks = list(regime.get("warnings") or [])
-    risks.extend(warning for row in top_sectors for warning in (row.get("warnings") or []))
+    data_risks = []
+    market_risks = []
+    theme_risks = []
+    for warning in regime.get("warnings") or []:
+        lowered = str(warning).lower()
+        if "sanity" in lowered or "anomaly" in lowered or "fallback" in lowered or "missing" in lowered:
+            data_risks.append(warning)
+        else:
+            market_risks.append(warning)
+    for row in top_sectors:
+        theme_risks.extend(row.get("warnings") or [])
     if freshness.get("watchlist_coverage_status") not in {None, "PASS", "정상"}:
-        risks.append("watchlist coverage warning")
+        data_risks.append("watchlist coverage warning")
     if freshness.get("sector_etf_coverage_status") not in {None, "PASS", "정상"}:
-        risks.append("sector ETF coverage warning")
+        data_risks.append("sector ETF coverage warning")
     if not watchlist_scores:
-        risks.append("watchlist empty")
+        data_risks.append("watchlist empty")
 
     unique = []
     seen = set()
-    for risk in risks:
-        text = _translate_warning(risk)
-        if text and text not in seen:
-            seen.add(text)
-            unique.append(text)
-
+    for bucket_name, bucket in [("[데이터]", data_risks), ("[시장]", market_risks), ("[테마/종목]", theme_risks)]:
+        for risk in bucket:
+            text = _translate_warning(risk)
+            if text and text not in seen:
+                seen.add(text)
+                unique.append(f"{bucket_name} {text}")
     for risk in unique[:5]:
         lines.append(f"- {risk}")
     if len(lines) == 1:
@@ -178,9 +189,10 @@ def build_risk_section(regime: dict, top_sectors: list[dict], watchlist_scores: 
 
 
 def build_checkpoints_section(top_sectors: list[dict], freshness: dict) -> list[str]:
-    lines = ["8. 장중 확인 포인트"]
+    title = "8. 장중 확인 포인트" if freshness.get("xkrx_is_open") else "8. 다음 거래일 확인 포인트"
+    lines = [title]
     if not freshness.get("xkrx_is_open"):
-        lines.append("- 한국장 휴장으로 장중 체크포인트는 없습니다.")
+        lines.append("- 한국장 휴장으로 실시간 대응은 없습니다.")
         future_items = []
         if top_sectors:
             future_items.append(f"다음 거래일 확인: {', '.join(_display_sector_name(row.get('sector_group')) for row in top_sectors[:2])} 흐름")
@@ -221,9 +233,9 @@ def _build_global_clause(regime: dict) -> str:
     positives = regime.get("positive_drivers") or []
     negatives = regime.get("negative_drivers") or []
     if positives:
-        return f"글로벌 지표는 {_driver_summary(positives[:2])}로 위험선호에 힘을 실었습니다."
+        return f"글로벌 지표는 {_driver_summary(positives[:2])} 쪽이 우세합니다."
     if negatives:
-        return f"글로벌 지표는 {_driver_summary(negatives[:2])}로 리스크 관리가 우선입니다."
+        return f"글로벌 지표는 {_driver_summary(negatives[:2])} 부담이 남아 있습니다."
     return "글로벌 지표는 방향성이 강하지 않아 중립 해석이 적절합니다."
 
 
@@ -237,7 +249,7 @@ def _build_etf_clause(leading_sector: dict) -> str:
     risk_note = ""
     if any("Speculative ETF excluded" in warning for warning in (leading_sector.get("warnings") or [])):
         risk_note = " 레버리지 ETF 급등은 주근거가 아닌 과열 참고 신호로만 해석합니다."
-    return f"{name} ETF는 {etf_reason}{risk_note}"
+    return f"{name} ETF 흐름은 대체로 양호합니다. {etf_reason}{risk_note}"
 
 
 def _build_flow_or_risk_clause(top_sectors: list[dict], freshness: dict, regime: dict) -> str:
@@ -246,11 +258,11 @@ def _build_flow_or_risk_clause(top_sectors: list[dict], freshness: dict, regime:
         if investor_reason and investor_reason != "Investor flow unavailable":
             return f"수급 측면에서는 {_investor_reason_text(investor_reason)}"
     if freshness.get("stale_warnings"):
-        return f"리스크 측면에서는 {freshness.get('stale_warnings')} 경고가 있어 추격 해석은 보수적으로 봐야 합니다."
+        return "데이터 리스크가 남아 있어 추격 해석은 보수적으로 보는 편이 좋습니다."
     warnings = regime.get("warnings") or []
     if warnings:
-        return f"리스크 측면에서는 {_translate_warning(warnings[0])} 이슈가 있어 장 초반 확인이 필요합니다."
-    return "리스크 측면에서는 장 초반 거래대금 유지 여부를 먼저 확인하는 편이 안전합니다."
+        return f"리스크 측면에서는 {_translate_warning(warnings[0])} 점검이 필요합니다."
+    return "리스크 측면에서는 거래대금과 수급 지속 여부를 먼저 확인하는 편이 안전합니다."
 
 
 def _market_open_text(value) -> str:
@@ -364,18 +376,32 @@ def _driver_summary(drivers: Iterable[str]) -> str:
 
 
 def _translate_driver(text: str) -> str:
-    translated = (
-        str(text)
-        .replace("S&P500 change", "S&P500")
-        .replace("Nasdaq change", "Nasdaq")
-        .replace("SOX change", "SOX")
-        .replace("USDKRW change", "USD/KRW")
-        .replace("KOSPI foreign net buy", "KOSPI 외국인 순매수")
-        .replace("KOSPI institutional net buy", "KOSPI 기관 순매수")
-        .replace("KOSPI foreign net sell", "KOSPI 외국인 순매도")
-        .replace("KOSPI institutional net sell", "KOSPI 기관 순매도")
-    )
-    return translated
+    raw = str(text)
+    replacements = {
+        "S&P500 change": "S&P500",
+        "Nasdaq change": "Nasdaq",
+        "SOX change": "SOX",
+        "USDKRW change": "USD/KRW",
+        "KOSPI foreign net buy": "KOSPI 외국인 순매수",
+        "KOSPI institutional net buy": "KOSPI 기관 순매수",
+        "KOSPI foreign net sell": "KOSPI 외국인 순매도",
+        "KOSPI institutional net sell": "KOSPI 기관 순매도",
+    }
+    for source, target in replacements.items():
+        if raw.startswith(source):
+            suffix = raw[len(source):].strip()
+            if suffix:
+                try:
+                    numeric = float(suffix.replace("%", "").replace("bp", ""))
+                    if "bp" in suffix:
+                        return f"{target} {numeric:+.1f}bp"
+                    if abs(numeric) <= 1:
+                        return f"{target} {numeric:+.2%}"
+                    return f"{target} {numeric:+.2f}"
+                except ValueError:
+                    return f"{target} {suffix}".strip()
+            return target
+    return raw
 
 
 def _translate_text(value) -> str:
@@ -433,6 +459,13 @@ def _translate_warning(value) -> str:
         "Speculative ETF excluded": "레버리지 ETF 급등은 과열 참고 신호로만 봅니다.",
         "OVERHEATED_20D": "20일 급등 과열 경고가 있습니다.",
         "contract fallback used": "리포트 contract view 일부 미조회로 fallback 데이터를 사용했습니다.",
+        "sp500 change rate anomaly": "S&P500 변화율 데이터 이상 가능성이 있습니다.",
+        "nasdaq change rate anomaly": "Nasdaq 변화율 데이터 이상 가능성이 있습니다.",
+        "sox change rate anomaly": "SOX 변화율 데이터 이상 가능성이 있습니다.",
+        "vix change rate anomaly": "VIX 변화율 데이터 이상 가능성이 있습니다.",
+        "usdkrw invalid": "USD/KRW 값 이상 가능성이 있습니다.",
+        "brent out of sanity range": "Brent 원천값 이상 가능성이 있습니다.",
+        "sp500 out of sanity range": "S&P500 원천값 이상 가능성이 있습니다.",
     }
     for source, target in replacements.items():
         text = text.replace(source, target)
@@ -477,11 +510,14 @@ def _format_pct(value) -> str:
 def _split_fragments(value) -> list[str]:
     if not value:
         return []
+    text = str(value).replace("\n", " ").strip()
+    if ";" not in text:
+        return [_clean_sentence(text)] if text else []
     parts = []
-    for chunk in str(value).replace(";", ".").split("."):
-        text = chunk.strip()
-        if text:
-            parts.append(_clean_sentence(text))
+    for chunk in text.split(";"):
+        cleaned = chunk.strip()
+        if cleaned:
+            parts.append(_clean_sentence(cleaned))
     return parts
 
 
@@ -522,7 +558,7 @@ def _clean_sentence(text: str) -> str:
 
 def _checkpoint_text(items: list[str], freshness: dict) -> str:
     if not freshness.get("xkrx_is_open"):
-        future_points = ["한국장 휴장으로 장중 체크포인트 없음"]
+        future_points = ["휴장으로 실시간 대응 없음"]
         translated = [_clean_checkpoint(item) for item in items if item]
         if translated:
             future_points.append(f"다음 거래일 확인: {translated[0]}")
@@ -539,3 +575,55 @@ def _display_stock_name(symbol, name) -> str:
     if text_symbol in STOCK_NAME_MAP:
         return STOCK_NAME_MAP[text_symbol]
     return str(name or text_symbol or "미확인").strip()
+
+
+def _summarize_morning_view(regime: dict, top_sectors: list[dict], freshness: dict) -> str:
+    sector = top_sectors[0] if top_sectors else {}
+    sector_name = _display_sector_name(sector.get("sector_group"))
+    secondary = _display_sector_name((top_sectors[1] if len(top_sectors) > 1 else {}).get("sector_group"))
+    global_driver = _global_summary_phrase(regime)
+    risk_note = _plain_phrase(_translate_warning((sector.get("warnings") or regime.get("warnings") or [""])[0])) if (sector.get("warnings") or regime.get("warnings")) else ""
+    sector_note = ""
+    if sector:
+        sector_note = f"{sector_name}와 {secondary}" if len(top_sectors) > 1 and secondary != "미확인" else sector_name
+    if not freshness.get("xkrx_is_open"):
+        line1 = f"한국장은 휴장이며, 다음 거래일 준비 관점에서는 {sector_note or '핵심 섹터'} 점검이 우선입니다."
+        line2 = f"전 거래일 기준으로 {global_driver or '글로벌 변수'}와 대표 ETF 흐름을 함께 보면 {sector_name or '주요 섹터'}의 단기 방향성은 아직 열려 있습니다."
+        line3 = f"다만 {_risk_summary_phrase(risk_note)} 점검은 필요합니다."
+        return " ".join([line1, line2, line3]).strip()
+    line1 = f"오늘 한국장은 {regime.get('market_tone') or '중립'} 쪽으로 출발할 가능성이 있습니다."
+    line2 = f"글로벌 변수는 {global_driver or '혼조'}이며, 우선 관찰 섹터는 {sector_name or '핵심 섹터'}입니다."
+    line3 = f"다만 {_risk_summary_phrase(risk_note or '추격보다 거래대금과 수급 확인')}이 필요합니다."
+    return " ".join([line1, line2, line3]).strip()
+
+
+def _plain_phrase(text: str) -> str:
+    value = re.sub(r"(?<!\d)\.(?!\d)", " ", str(text or "")).strip()
+    return " ".join(value.split())
+
+
+def _risk_summary_phrase(text: str) -> str:
+    lowered = str(text or "")
+    if "과열" in lowered:
+        return "단기 과열 신호"
+    if "레버리지" in lowered:
+        return "레버리지 ETF 과열 신호"
+    if "stale" in lowered or "coverage" in lowered:
+        return "데이터 공백 가능성"
+    return text or "과열과 수급 변동성"
+
+
+def _global_summary_phrase(regime: dict) -> str:
+    positives = " ".join(regime.get("positive_drivers") or []).lower()
+    negatives = " ".join(regime.get("negative_drivers") or []).lower()
+    if "sox" in positives and "nasdaq" in positives:
+        return "미국 기술주와 SOX 강세"
+    if "sox" in negatives and "nasdaq" in negatives:
+        return "미국 기술주와 SOX 약세"
+    if "s&p500" in positives or "nasdaq" in positives:
+        return "미국 증시 강세"
+    if "s&p500" in negatives or "nasdaq" in negatives:
+        return "미국 증시 약세"
+    if "us10y" in negatives or "usdkrw" in negatives:
+        return "환율·금리 부담"
+    return _plain_phrase(_driver_summary((regime.get("positive_drivers") or regime.get("negative_drivers") or [])[:2])) or "글로벌 변수"

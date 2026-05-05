@@ -36,6 +36,32 @@ class ReportSqlContractTests(unittest.TestCase):
         self.assertIn("report_required_stock_universe", sql)
         self.assertIn("select distinct on (symbol)", sql.lower())
 
+    def test_seed_sql_and_configs_are_koreanized(self):
+        sql = (ROOT / "sql" / "deploy_report_universe_tables.sql").read_text(encoding="utf-8")
+        etf_yaml = (ROOT / "config" / "report_required_etf_universe.yml").read_text(encoding="utf-8")
+        stock_yaml = (ROOT / "config" / "report_required_stock_universe.yml").read_text(encoding="utf-8")
+        banned_tokens = [
+            "Semiconductor",
+            "Battery",
+            "Defense",
+            "Shipbuilding",
+            "Financials",
+            "Healthcare",
+            "AI Power",
+            "Samsung Electronics",
+            "SK hynix",
+            "Hyundai Mobis",
+        ]
+        for token in banned_tokens:
+            self.assertNotIn(token, sql)
+            self.assertNotIn(token, etf_yaml)
+            self.assertNotIn(token, stock_yaml)
+
+    def test_gitignore_covers_generated_artifacts(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for token in ["outputs/", "reports/daily_quant_report_*.md", "__pycache__/", "*.pyc"]:
+            self.assertIn(token, gitignore)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,23 @@ class MorningRegimeTests(unittest.TestCase):
         )
         self.assertLess(carry_regime["score"], open_regime["score"])
 
+    def test_sanity_range_warning_is_generated(self):
+        regime = build_global_morning_regime(
+            {
+                "sp500": 5000,
+                "sp500_change_rate": -0.40,
+                "usdkrw": 0,
+                "usdkrw_change_rate": 0.0,
+                "brent": 500,
+                "brent_change_rate": 0.01,
+            },
+            {"xnys_is_open": True, "carry_forward_fields": [], "missing_required_data": ""},
+        )
+        warning_text = " ".join(regime["warnings"]).lower()
+        self.assertIn("sp500 change rate anomaly", warning_text)
+        self.assertIn("usdkrw invalid", warning_text)
+        self.assertIn("brent out of sanity range", warning_text)
+
 
 if __name__ == "__main__":
     unittest.main()

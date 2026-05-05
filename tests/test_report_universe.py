@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from src.utils.report_universe import (
     active_symbols,
@@ -21,7 +22,21 @@ class ReportUniverseTests(unittest.TestCase):
         rows = load_report_required_etf_universe()
         leverage = next(row for row in rows if row["symbol"] == "462330")
         self.assertTrue(leverage["exclude_from_signal"])
-        self.assertIn("Leverage", leverage["exclude_reason"])
+        self.assertIn("레버리지", leverage["exclude_reason"])
+
+    def test_report_required_etf_universe_is_koreanized(self):
+        rows = load_report_required_etf_universe()
+        joined = " ".join(f"{row['name']} {row['sector_group']} {row.get('theme_group') or ''}" for row in rows)
+        for banned in ["Semiconductor", "Battery", "Defense", "Shipbuilding", "Financials", "Healthcare", "AI Power"]:
+            self.assertNotIn(banned, joined)
+        self.assertTrue(any(row["sector_group"] == "반도체" for row in rows))
+
+    def test_report_required_stock_universe_is_koreanized(self):
+        rows = load_report_required_stock_universe()
+        joined = " ".join(f"{row['name']} {row['sector_group']}" for row in rows)
+        for banned in ["Samsung Electronics", "SK hynix", "Hyundai Mobis", "Semiconductor", "Automobile", "Financials"]:
+            self.assertNotIn(banned, joined)
+        self.assertTrue(any(row["name"] == "삼성전자" for row in rows))
 
     def test_report_required_macro_series_loads(self):
         rows = load_report_required_macro_series()
@@ -73,6 +88,11 @@ class ReportUniverseTests(unittest.TestCase):
         symbols = {row["symbol"] for row in rows}
         self.assertIn("017670", symbols)
         self.assertIn("005930", symbols)
+
+    def test_deploy_seed_sql_has_no_english_sector_group(self):
+        sql = (Path(__file__).resolve().parent.parent / "sql" / "deploy_report_universe_tables.sql").read_text(encoding="utf-8")
+        for banned in ["'Semiconductor'", "'Battery'", "'Defense'", "'Shipbuilding'", "'Financials'", "'Healthcare'", "'AI Power'"]:
+            self.assertNotIn(banned, sql)
 
 
 if __name__ == "__main__":
