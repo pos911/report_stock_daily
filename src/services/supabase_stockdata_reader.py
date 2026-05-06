@@ -63,12 +63,14 @@ class SupabaseStockDataReader:
             failed_views.append("report_watchlist_snapshot_view")
         if any(row.get("contract_fallback_used") for row in rankings):
             failed_views.append("report_market_ranking_view")
+        readiness = self.base_reader.fetch_stockdata_report_readiness(target_date)
         return {
             "freshness": freshness,
             "macro": macro,
             "sector_etfs": sector_etfs,
             "watchlist": watchlist,
             "rankings": rankings,
+            "readiness": readiness,
             "contract_fallback_used": fallback_used,
             "contract_failed_views": failed_views,
         }
@@ -184,13 +186,30 @@ class SupabaseStockDataReader:
                 for row in rows
             ]
         latest_date = self._get_latest_base_date("normalized_market_rankings_daily")
-        fallback_rows = self._fetch_rows(
+        
+        # [NEW] Apply source filtering rules for fallback
+        # volume: source='KIS', trading_value/market_cap: source in ('KRX', 'VALID_PRICE_FALLBACK')
+        all_fallback_rows = self._fetch_rows(
             "normalized_market_rankings_daily",
             columns="*",
-            limit=1000,
+            limit=2000,
             filters=[("eq", "base_date", latest_date)] if latest_date else [],
         )
-        return [self._normalize_ranking_row(row, contract_fallback_used=True, target_date=target_date) for row in fallback_rows]
+        
+        filtered_rows = []
+        for row in all_fallback_rows:
+            rt = row.get("rank_type")
+            src = row.get("source")
+            if rt == "volume":
+                if src == "KIS":
+                    filtered_rows.append(row)
+            elif rt in ("trading_value", "market_cap"):
+                if src in ("KRX", "VALID_PRICE_FALLBACK"):
+                    filtered_rows.append(row)
+            else:
+                filtered_rows.append(row)
+                
+        return [self._normalize_ranking_row(row, contract_fallback_used=True, target_date=target_date) for row in filtered_rows]
 
     def fetch_report_contract_bundle(self) -> dict:
         return self.get_report_contract_bundle("morning")

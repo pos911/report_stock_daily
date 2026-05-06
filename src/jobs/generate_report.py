@@ -16,6 +16,7 @@ from src.notification.telegram_sender import TelegramSender
 from src.reports.morning_report import generate_morning_brief, save_morning_snapshot
 from src.services.supabase_stockdata_reader import SupabaseStockDataReader
 from src.data.supabase_reader import SupabaseReader
+from src.analysis.gemini_analyzer import GeminiAnalyzer
 from src.utils.formatters import NA_TEXT, is_missing
 
 
@@ -220,9 +221,18 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     return "\n".join(lines) + "\n"
 
 
+def _safe_get_analyzer() -> GeminiAnalyzer | None:
+    try:
+        return GeminiAnalyzer()
+    except Exception as exc:
+        logger.warning("GeminiAnalyzer initialization failed: %s", exc)
+        return None
+
+
 def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | None = None, send_enabled: bool = True):
     base_reader = SupabaseReader()
     reader = SupabaseStockDataReader(base_reader=base_reader)
+    analyzer = _safe_get_analyzer()
     normalized_report_date = _normalize_report_date(report_date, now_kst)
     calendar_status = base_reader.fetch_market_calendar_status(normalized_report_date)
     logger.info("calendar_status=%s", calendar_status)
@@ -232,16 +242,18 @@ def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | 
         logger.info("\n%s", skip_text)
         return
 
+    bundle = reader.get_report_contract_bundle(report_type="morning", target_date=normalized_report_date)
+    readiness = bundle.get("readiness") or {}
+    logger.info("stockdata_readiness=%s", readiness)
+
     if report_type == "morning":
-        bundle = reader.get_report_contract_bundle(report_type="morning", target_date=normalized_report_date)
         result = generate_morning_brief(bundle, normalized_report_date)
         report_content = result["report_text"]
         snapshot_path = save_morning_snapshot(project_root, normalized_report_date, result["snapshot"])
         logger.info("Morning snapshot saved: %s", snapshot_path)
-        logger.info("Gemini call count and purpose=0 / []")
+        logger.info("Gemini call count and purpose=0 / []") # Will update this when integrated
         logger.info("Naver call count=0")
     else:
-        bundle = reader.get_report_contract_bundle(report_type="morning", target_date=normalized_report_date)
         report_content = _build_simple_non_morning_report(report_type, normalized_report_date, bundle)
 
     _save_report(report_type, report_content, now_kst)

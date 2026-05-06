@@ -64,6 +64,15 @@ def build_data_status_section(freshness: dict, bundle: dict) -> list[str]:
     lines.append(f"- breadth 기준일: {freshness.get('latest_breadth_date') or NA_TEXT}")
     lines.append(f"- 섹터 ETF coverage: {_coverage_text(freshness.get('sector_etf_coverage_status'))}")
     lines.append(f"- 관심종목 coverage: {_coverage_text(freshness.get('watchlist_coverage_status'))}")
+
+    readiness = bundle.get("readiness") or {}
+    kr_status = "READY" if readiness.get("kr_full_market_price_ready") else "KIS_ONLY"
+    lines.append(f"- 국내 시장 모드: {kr_status}")
+
+    blocked = readiness.get("report_blocked_sections") or []
+    if blocked:
+        lines.append(f"- 차단된 섹션: {', '.join(blocked)}")
+
     if bundle.get("contract_failed_views"):
         lines.append(f"- 주의: 리포트 contract view 일부 미조회로 fallback 데이터를 사용했습니다. ({', '.join(bundle.get('contract_failed_views') or [])})")
     if freshness.get("carry_forward_fields"):
@@ -77,7 +86,6 @@ def build_data_status_section(freshness: dict, bundle: dict) -> list[str]:
 
 def build_one_line_judgment_section(regime: dict, top_sectors: list[dict], freshness: dict) -> list[str]:
     return ["2. 오늘의 한 줄 판단", _summarize_morning_view(regime, top_sectors, freshness)]
-
 
 def build_global_market_section(macro: dict) -> list[str]:
     return [

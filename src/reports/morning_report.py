@@ -24,6 +24,8 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     sector_etfs = bundle["sector_etfs"]
     watchlist = bundle["watchlist"]
     rankings = bundle["rankings"]
+    readiness = bundle.get("readiness") or {}
+    blocked_sections = readiness.get("report_blocked_sections") or []
 
     regime = build_global_morning_regime(macro, freshness)
     sector_impacts = build_sector_morning_impacts(regime, sector_etfs, rankings, watchlist)
@@ -38,13 +40,28 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     sections = [
         build_data_status_section(freshness, bundle),
         build_one_line_judgment_section(regime, top_sectors, freshness),
-        build_global_market_section(macro),
-        build_korean_impact_section(top_sectors, freshness),
-        build_priority_themes_section(top_sectors, freshness),
-        build_watchlist_section(watchlist_scores, freshness),
-        build_risk_section(regime, top_sectors, watchlist_scores, freshness),
-        build_checkpoints_section(top_sectors, freshness),
     ]
+
+    if "morning_macro" not in blocked_sections:
+        sections.append(build_global_market_section(macro))
+
+    if "morning_sector" not in blocked_sections:
+        sections.append(build_korean_impact_section(top_sectors, freshness))
+        sections.append(build_priority_themes_section(top_sectors, freshness))
+
+    if "morning_watchlist" not in blocked_sections:
+        sections.append(build_watchlist_section(watchlist_scores, freshness))
+
+    sections.append(build_risk_section(regime, top_sectors, watchlist_scores, freshness))
+    sections.append(build_checkpoints_section(top_sectors, freshness))
+
+    # Add coverage limitation note if KR full market is not ready
+    if not readiness.get("kr_full_market_price_ready"):
+        sections.append([
+            "",
+            "> [!NOTE]",
+            "> **데이터 커버리지 안내**: 현재 국내 시장은 KRX 전종목 가격 대신 KIS 관심종목 및 주요 랭킹 후보 위주로 데이터가 제공됩니다. 전체 시장 거래대금 상위 대신 KIS 거래량 상위 데이터를 기반으로 리포트가 생성되었습니다."
+        ])
     lines = [f"[Morning Brief | {report_date}]"]
     for section in sections:
         lines.append("")

@@ -152,6 +152,212 @@ class SupabaseReader:
             "next_trading_day": next_open,
         }
 
+    def fetch_stockdata_report_readiness(self, report_date: str | datetime.date | None = None) -> dict:
+        """
+        Calculates StockData readiness for various report sections.
+        Returns a dict with flags and section lists.
+        """
+        normalized_date = self._normalize_report_date(report_date)
+        
+        # 1. latest_xkrx_trading_day
+        latest_xkrx_trading_day = None
+        calendar_fallback_used = False
+        try:
+            # exchange_code='XKRX', is_open=True, calendar_date <= normalized_date
+            resp = self.client.table("market_trading_calendar") \
+                .select("calendar_date") \
+                .eq("exchange_code", "XKRX") \
+                .eq("is_open", True) \
+                .lte("calendar_date", normalized_date.isoformat()) \
+                .order("calendar_date", desc=True) \
+                .limit(1) \
+                .execute()
+            if resp.data:
+                latest_xkrx_trading_day = resp.data[0]["calendar_date"]
+        except Exception:
+            pass
+
+        if not latest_xkrx_trading_day:
+            calendar_fallback_used = True
+            # Fallback to latest date in prices or rankings
+            latest_price_date = self._get_latest_base_date("normalized_stock_prices_daily")
+            latest_ranking_date = self._get_latest_base_date("normalized_market_rankings_daily")
+            latest_xkrx_trading_day = latest_price_date or latest_ranking_date
+
+        if not latest_xkrx_trading_day:
+            return {
+                "latest_xkrx_trading_day": None,
+                "kr_full_market_price_ready": False,
+                "kis_universe_ready": False,
+                "kis_volume_ranking_ready": False,
+                "kr_trading_value_ranking_ready": False,
+                "kr_market_cap_ranking_ready": False,
+                "etf_etn_ready": False,
+                "report_allowed_sections": ["macro", "us_market"],
+                "report_blocked_sections": ["kr_full_market_trading_value_top", "kr_full_market_market_cap_top", "kis_volume_top", "watchlist_signal"],
+                "data_limitation_note": "국내 시장 데이터가 아직 준비되지 않아 기본 섹션만 생성합니다.",
+                "diagnostics": {"calendar_fallback_used": calendar_fallback_used}
+            }
+
+        # 2. kr_full_market_price_ready
+        kr_full_market_price_ready = False
+        kospi_count = 0
+        kosdaq_count = 0
+        try:
+            master_resp = self.client.table("stocks_master").select("symbol, market, asset_type").execute()
+            master_df = pd.DataFrame(master_resp.data) if master_resp.data else pd.DataFrame()
+            
+            if not master_df.empty:
+                valid_symbols = master_df[(master_df['market'].isin(['KOSPI', 'KOSDAQ'])) & (master_df['asset_type'] == 'STOCK')]['symbol'].tolist()
+                
+                price_rows = self._execute_paged_query(
+                    "normalized_stock_prices_daily",
+                    "symbol",
+                    query_mutator=lambda q: q.eq("base_date", latest_xkrx_trading_day).gt("volume", 0).not_.is_("close_price", "null")
+                )
+                price_symbols = {r["symbol"] for r in price_rows}
+                
+                kospi_count = len(master_df[(master_df['market'] == 'KOSPI') & (master_df['asset_type'] == 'STOCK') & (master_df['symbol'].isin(price_symbols))])
+                kosdaq_count = len(master_df[(master_df['market'] == 'KOSDAQ') & (master_df['asset_type'] == 'STOCK') & (master_df['symbol'].isin(price_symbols))])
+                
+                if kospi_count >= 700 and kosdaq_count >= 1200:
+                    kr_full_market_price_ready = True
+        except Exception as e:
+            print(f"[WARNING] kr_full_market_price_ready calculation failed: {e}")
+
+        # 3. kis_volume_ranking_ready
+        kis_volume_ranking_ready = False
+        try:
+            resp = self.client.table("normalized_market_rankings_daily") \
+                .select("symbol") \
+                .eq("base_date", latest_xkrx_trading_day) \
+                .eq("source", "KIS") \
+                .eq("rank_type", "volume") \
+                .limit(1) \
+                .execute()
+            if resp.data:
+                kis_volume_ranking_ready = True
+        except Exception:
+            pass
+
+        # 4. kis_universe_ready
+        kis_universe_ready = False
+        try:
+            # Check pipeline_run_logs
+            log_resp = self.client.table("pipeline_run_logs") \
+                .select("status") \
+                .eq("job_name", "daily_kis_universe_pipeline") \
+                .order("target_date", desc=True) \
+                .limit(1) \
+                .execute()
+            if log_resp.data and (log_resp.data[0]["status"].startswith("SUCCESS") or log_resp.data[0]["status"].startswith("WARN_PARTIAL")):
+                kis_universe_ready = True
+            else:
+                # Fallback to snapshots
+                snap_resp = self.client.table("normalized_stock_snapshots_daily") \
+                    .select("symbol") \
+                    .eq("base_date", latest_xkrx_trading_day) \
+                    .eq("source", "KIS_DETAIL") \
+                    .limit(1) \
+                    .execute()
+                if snap_resp.data:
+                    kis_universe_ready = True
+        except Exception:
+            pass
+
+        # 5 & 6. kr_trading_value_ranking_ready, kr_market_cap_ranking_ready
+        kr_trading_value_ranking_ready = False
+        kr_market_cap_ranking_ready = False
+        if kr_full_market_price_ready:
+            try:
+                tv_resp = self.client.table("normalized_market_rankings_daily") \
+                    .select("symbol") \
+                    .eq("base_date", latest_xkrx_trading_day) \
+                    .eq("rank_type", "trading_value") \
+                    .neq("source", "KIS") \
+                    .limit(1) \
+                    .execute()
+                if tv_resp.data:
+                    kr_trading_value_ranking_ready = True
+                    
+                mc_resp = self.client.table("normalized_market_rankings_daily") \
+                    .select("symbol") \
+                    .eq("base_date", latest_xkrx_trading_day) \
+                    .eq("rank_type", "market_cap") \
+                    .limit(1) \
+                    .execute()
+                if mc_resp.data:
+                    kr_market_cap_ranking_ready = True
+            except Exception:
+                pass
+
+        # 7. etf_etn_ready
+        etf_etn_ready = False
+        try:
+            # Check rankings or prices for ETF/ETN
+            etf_resp = self.client.table("normalized_market_rankings_daily") \
+                .select("symbol") \
+                .eq("base_date", latest_xkrx_trading_day) \
+                .ilike("symbol", "5%") \
+                .limit(1) \
+                .execute()
+            if etf_resp.data:
+                etf_etn_ready = True
+        except Exception:
+            pass
+
+        # 8 & 9. report_allowed_sections, report_blocked_sections
+        report_allowed_sections = ["macro", "us_market"]
+        report_blocked_sections = []
+
+        if kis_volume_ranking_ready:
+            report_allowed_sections.append("kis_volume_top")
+        else:
+            report_blocked_sections.append("kis_volume_top")
+
+        if kis_universe_ready:
+            report_allowed_sections.append("watchlist_signal")
+        else:
+            report_blocked_sections.append("watchlist_signal")
+
+        if etf_etn_ready:
+            report_allowed_sections.append("etf_etn")
+        else:
+            report_blocked_sections.append("etf_etn")
+
+        if kr_trading_value_ranking_ready:
+            report_allowed_sections.append("kr_full_market_trading_value_top")
+        else:
+            report_blocked_sections.append("kr_full_market_trading_value_top")
+
+        if kr_market_cap_ranking_ready:
+            report_allowed_sections.append("kr_full_market_market_cap_top")
+        else:
+            report_blocked_sections.append("kr_full_market_market_cap_top")
+
+        # 10. data_limitation_note
+        data_limitation_note = ""
+        if not kr_full_market_price_ready:
+            data_limitation_note = "국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다. 거래량 상위는 KIS ranking 기준으로 참고 제공합니다."
+
+        return {
+            "latest_xkrx_trading_day": latest_xkrx_trading_day,
+            "kr_full_market_price_ready": kr_full_market_price_ready,
+            "kis_universe_ready": kis_universe_ready,
+            "kis_volume_ranking_ready": kis_volume_ranking_ready,
+            "kr_trading_value_ranking_ready": kr_trading_value_ranking_ready,
+            "kr_market_cap_ranking_ready": kr_market_cap_ranking_ready,
+            "etf_etn_ready": etf_etn_ready,
+            "report_allowed_sections": report_allowed_sections,
+            "report_blocked_sections": report_blocked_sections,
+            "data_limitation_note": data_limitation_note,
+            "diagnostics": {
+                "calendar_fallback_used": calendar_fallback_used,
+                "kospi_count": kospi_count,
+                "kosdaq_count": kosdaq_count
+            }
+        }
+
     def fetch_market_calendar_status(self, report_date: str | datetime.date | None = None) -> dict:
         normalized_date = self._normalize_report_date(report_date)
         fallback = {
@@ -710,26 +916,47 @@ class SupabaseReader:
         if not latest_date:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
 
-        # 3. volume 상위 추출 (feature_store_daily → normalized_stock_prices_daily 폴백)
+        # 3. volume 상위 추출
         sorted_vols = []
+        # [NEW] 우선순위 1: normalized_market_rankings_daily (source='KIS', rank_type='volume')
         try:
-            vol_resp = (
-                self.client.table("feature_store_daily")
-                .select("symbol, feature_value")
+            rank_resp = (
+                self.client.table("normalized_market_rankings_daily")
+                .select("symbol, rank_value")
                 .eq("base_date", latest_date)
-                .eq("feature_name", "volume")
+                .eq("source", "KIS")
+                .eq("rank_type", "volume")
+                .order("rank", asc=True)
                 .execute()
             )
-            if vol_resp.data:
-                sorted_vols = sorted(
-                    vol_resp.data,
-                    key=lambda x: float(x.get("feature_value") or 0),
-                    reverse=True,
-                )
-        except Exception:
-            pass
+            if rank_resp.data:
+                sorted_vols = [
+                    {"symbol": r["symbol"], "feature_value": r.get("rank_value") or 0}
+                    for r in rank_resp.data
+                ]
+        except Exception as e:
+            print(f"[INFO] KIS volume ranking 조회 실패 (폴백 시도): {e}")
 
-        # feature_store_daily 없거나 비어 있으면 normalized_stock_prices_daily 폴백
+        # 폴백 1: feature_store_daily
+        if not sorted_vols:
+            try:
+                vol_resp = (
+                    self.client.table("feature_store_daily")
+                    .select("symbol, feature_value")
+                    .eq("base_date", latest_date)
+                    .eq("feature_name", "volume")
+                    .execute()
+                )
+                if vol_resp.data:
+                    sorted_vols = sorted(
+                        vol_resp.data,
+                        key=lambda x: float(x.get("feature_value") or 0),
+                        reverse=True,
+                    )
+            except Exception:
+                pass
+
+        # 폴백 2: normalized_stock_prices_daily
         if not sorted_vols:
             try:
                 price_resp = (
@@ -749,6 +976,7 @@ class SupabaseReader:
 
         if not sorted_vols:
             return {"KOSPI": [], "KOSDAQ": [], "ETF": []}
+
 
 
         # 분류 및 심볼 리스트 추출
