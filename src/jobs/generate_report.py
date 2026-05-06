@@ -201,24 +201,96 @@ def _save_report(report_type: str, report_content: str, now_kst: datetime.dateti
 
 
 def _build_simple_non_morning_report(report_type: str, report_date: str, bundle: dict) -> str:
-    freshness = bundle["freshness"]
-    macro = bundle["macro"]
+    readiness = bundle.get("readiness") or {}
+    allowed_sections = readiness.get("report_allowed_sections") or []
+    blocked_sections = readiness.get("report_blocked_sections") or []
+    
+    freshness = bundle.get("freshness") or {}
+    macro = bundle.get("macro") or {}
+    rankings = bundle.get("rankings") or []
+    watchlist = bundle.get("watchlist") or []
+
     lines = [
         f"[{report_type.title()} Brief | {report_date}]",
         "",
-        "1. 데이터 상태",
+        "1. 시장 상태",
         f"- 한국장: {'개장' if freshness.get('xkrx_is_open') else '휴장'}",
         f"- 미국장: {'개장' if freshness.get('xnys_is_open') else '휴장'}",
+        f"- 국내 전종목 가격 커버리지: {'충족' if readiness.get('kr_full_market_price_ready') else '미충족'}",
+        f"- 사용 가능: {', '.join(allowed_sections) if allowed_sections else '없음'}",
+        f"- 생략: {', '.join(blocked_sections) if blocked_sections else '없음'}",
         "",
-        "2. 요약",
+        "2. 주요 지표",
         f"- KOSPI: {macro.get('kospi') or NA_TEXT}",
         f"- KOSDAQ: {macro.get('kosdaq') or NA_TEXT}",
         f"- USD/KRW: {macro.get('usdkrw') or NA_TEXT}",
+        f"- US 10Y-3Y: {macro.get('us10y_us3y_spread_bp') or NA_TEXT}bp",
         "",
-        "3. 비고",
-        "- Morning Brief 리디자인 이후 regular/closing은 기존 contract 데이터 기준의 간략 요약을 제공합니다.",
     ]
-    return "\n".join(lines) + "\n"
+    
+    # 3. 국내 데이터 범위
+    if not readiness.get('kr_full_market_price_ready'):
+        lines.extend([
+            "3. 국내 데이터 범위",
+            "- 국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다.",
+            "- 거래량 상위는 KIS ranking 기준으로만 참고합니다.",
+            ""
+        ])
+
+    # 4. KIS 거래량 순위 기준
+    if "kis_volume_top" in allowed_sections:
+        kis_rankings = [r for r in rankings if r.get("source") == "KIS" and r.get("rank_type") == "volume"]
+        if kis_rankings:
+            lines.append("4. KIS 거래량 순위 기준")
+            for r in kis_rankings[:5]:
+                symbol = r.get("symbol")
+                name = r.get("name") or r.get("stock_name") or symbol
+                val = r.get("rank_value")
+                if val is not None:
+                    try:
+                        val_str = f"{float(val):,.0f}"
+                        lines.append(f"- {name}({symbol}): {val_str}")
+                    except (ValueError, TypeError):
+                        lines.append(f"- {name}({symbol})")
+                else:
+                    lines.append(f"- {name}({symbol})")
+            lines.append("")
+
+    # 5. 관심종목·랭킹 후보 Signal
+    if "watchlist_signal" in allowed_sections:
+        if watchlist:
+            lines.append("5. 관심종목·랭킹 후보 기반 Signal")
+            for w in watchlist[:5]:
+                name = w.get("name") or w.get("symbol")
+                price = w.get("close_price")
+                change = w.get("change_rate_1d")
+                score = w.get("signal_score")
+                label = w.get("label")
+                
+                parts = [f"- {name}"]
+                if price is not None:
+                    try:
+                        parts.append(f"{float(price):,.0f}원")
+                    except (ValueError, TypeError):
+                        pass
+                if change is not None:
+                    try:
+                        parts.append(f"({float(change):+.2%})")
+                    except (ValueError, TypeError):
+                        pass
+                if label:
+                    parts.append(f"| {label}")
+                if score is not None:
+                    parts.append(f"(Score: {score})")
+                
+                lines.append(" ".join(parts))
+            lines.append("")
+
+    # 6. 비고
+    if blocked_sections:
+        lines.append(f"※ 생략된 섹션: {', '.join(blocked_sections)}")
+    
+    return "\n".join(lines).strip() + "\n"
 
 
 def _safe_get_analyzer() -> GeminiAnalyzer | None:
