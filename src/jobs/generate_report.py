@@ -12,7 +12,6 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent
 sys.path.append(str(project_root))
 
-from src.analysis.gemini_analyzer import GeminiAnalyzer
 from src.data.supabase_reader import SupabaseReader
 from src.notification.telegram_sender import TelegramSender
 from src.reports.morning_report import generate_morning_brief, save_morning_snapshot
@@ -200,14 +199,6 @@ def _format_watchlist_section(prepared_snapshots: list[dict], title: str = "## W
     return lines
 
 
-def _safe_get_analyzer() -> GeminiAnalyzer | None:
-    try:
-        return GeminiAnalyzer()
-    except Exception as exc:
-        logger.warning("GeminiAnalyzer initialization failed: %s", exc)
-        return None
-
-
 def _build_simple_non_morning_report(report_type: str, report_date: str, bundle: dict) -> str:
     readiness = bundle.get("readiness") or {}
     freshness = bundle.get("freshness") or {}
@@ -377,7 +368,6 @@ def _translate_blocked(values: list[str]) -> list[str]:
 def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | None = None, send_enabled: bool = True):
     base_reader = SupabaseReader()
     reader = SupabaseStockDataReader(base_reader=base_reader)
-    analyzer = _safe_get_analyzer()
     normalized_report_date = _normalize_report_date(report_date, now_kst)
     calendar_status = base_reader.fetch_market_calendar_status(normalized_report_date)
     logger.info("calendar_status=%s", calendar_status)
@@ -389,7 +379,7 @@ def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | 
 
     bundle = reader.get_report_contract_bundle(report_type=report_type, target_date=normalized_report_date)
     logger.info("stockdata_readiness=%s", bundle.get("readiness") or {})
-    logger.info("Gemini analyzer active=%s", bool(analyzer))
+    logger.info("Gemini content generation=disabled (rule-based report assembly)")
 
     if report_type == "morning":
         result = generate_morning_brief(bundle, normalized_report_date)
