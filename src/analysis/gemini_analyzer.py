@@ -69,17 +69,30 @@ class GeminiAnalyzer:
 
 
 
-    def _build_silent_skip_rules(self, blocked_sections: list[str] | None = None):
+    def _build_silent_skip_rules(self, blocked_sections: list[str] | None = None, readiness_context: dict | None = None):
         """Common silent-skip rules shared across prompts."""
         blocked_text = ""
         if blocked_sections:
             blocked_text = f"\n- **현재 차단된 섹션 (절대 언급 금지)**: {', '.join(blocked_sections)}"
+        readiness_text = ""
+        if readiness_context:
+            readiness_text = (
+                f"\n- **StockData readiness**: kr_full_market_price_ready={readiness_context.get('kr_full_market_price_ready')}, "
+                f"kis_universe_ready={readiness_context.get('kis_universe_ready')}, "
+                f"kis_volume_ranking_ready={readiness_context.get('kis_volume_ranking_ready')}"
+                f"\n- **허용 섹션**: {', '.join(readiness_context.get('report_allowed_sections') or []) or 'macro, us_market'}"
+                f"\n- **차단 섹션**: {', '.join(readiness_context.get('report_blocked_sections') or []) or 'none'}"
+                f"\n- **데이터 한계**: {readiness_context.get('data_limitation_note') or 'none'}"
+            )
             
         return f"""
 ## 공통 엄격 금지 사항 (Silent Skip 원칙)
 - "데이터가 없습니다", "데이터가 부족합니다", "제공되지 않아", "N/A", "Not available" 같은 표현 절대 금지.
-- 데이터가 없는 섹션/지표/종목은 아무 언급 없이 조용히 생략(Silent Skip).{blocked_text}
+- 데이터가 없는 섹션/지표/종목은 아무 언급 없이 조용히 생략(Silent Skip).{blocked_text}{readiness_text}
 - "국내 전체시장 거래대금 상위" 등 '전체시장'을 암시하는 표현 금지. 대신 "KIS 거래량 상위" 또는 "주요 종목"으로 표현.
+- KIS universe, KIS_DETAIL, KIS ranking 데이터는 국내 전체시장 통계처럼 해석하지 마라.
+- `kr_full_market_trading_value_top`, `kr_full_market_market_cap_top` 섹션을 임의 생성하지 마라.
+- BUY / HOLD / SELL 표현 금지.
 - 마크다운 최상위 헤더 `#`, `##` 금지. Python 조립 단계가 구조 헤더를 담당하므로 `###` 이하만 사용.
 - 인사말, 상황 설명식 서론, 전체 결론 금지. 바로 본문만 작성.
 - If any metric or section has no data, do not mention it. Simply omit and analyze only what is available.

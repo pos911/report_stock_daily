@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import math
+from collections.abc import Iterable
 
 
-NA_TEXT = "N/A"
+NA_TEXT = "미확인"
 
 
 def is_missing(value) -> bool:
@@ -9,7 +12,25 @@ def is_missing(value) -> bool:
         return True
     if isinstance(value, float) and math.isnan(value):
         return True
-    return False
+    return value == ""
+
+
+def safe_float(value) -> float | None:
+    if is_missing(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_change_rate(value) -> float | None:
+    numeric = safe_float(value)
+    if numeric is None:
+        return None
+    if abs(numeric) > 1:
+        return numeric / 100
+    return numeric
 
 
 def format_date(value) -> str:
@@ -17,15 +38,37 @@ def format_date(value) -> str:
 
 
 def format_index(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):,.2f}"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{numeric:,.2f}"
+
+
+def format_number(value, digits: int = 2) -> str:
+    numeric = safe_float(value)
+    if numeric is None:
+        return NA_TEXT
+    return f"{numeric:,.{digits}f}".rstrip("0").rstrip(".")
+
+
+def format_plain_number(value, digits: int = 2) -> str:
+    return format_number(value, digits=digits)
+
+
+def format_pct(value, digits: int = 2) -> str:
+    numeric = safe_change_rate(value)
+    if numeric is None:
+        return NA_TEXT
+    return f"{numeric:+.{digits}%}"
 
 
 def format_percent(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):+.2f}%"
+    return format_pct(value)
 
 
 def format_rate_percent(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):.2f}%"
+    numeric = safe_float(value)
+    if numeric is None:
+        return NA_TEXT
+    return f"{numeric:.2f}%"
 
 
 def format_rate_level(value) -> str:
@@ -33,7 +76,8 @@ def format_rate_level(value) -> str:
 
 
 def format_bp(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):+.1f}bp"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{numeric:+.1f}bp"
 
 
 def format_spread_bp(value) -> str:
@@ -41,64 +85,108 @@ def format_spread_bp(value) -> str:
 
 
 def format_usdkrw(value) -> str:
-    return NA_TEXT if is_missing(value) else f"1달러 = {float(value):,.2f}원"
-
-
-def format_plain_number(value, digits: int = 2) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):,.{digits}f}"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"1달러 = {numeric:,.2f}원"
 
 
 def format_volume(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{int(round(float(value))):,}주"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{int(round(numeric)):,}주"
 
 
 def format_price(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{int(round(float(value))):,}원"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{int(round(numeric)):,}원"
 
 
 def format_trading_value(value) -> str:
-    if is_missing(value):
+    numeric = safe_float(value)
+    if numeric is None:
         return NA_TEXT
-    eok = float(value) / 100_000_000
-    return f"{int(round(eok)):,}억원"
+    eok = numeric / 100_000_000
+    return f"{eok:,.0f}억원"
 
 
 def format_market_cap(value) -> str:
-    if is_missing(value):
+    numeric = safe_float(value)
+    if numeric is None:
         return NA_TEXT
-    numeric = float(value)
     if numeric >= 1_000_000_000_000:
         return f"{numeric / 1_000_000_000_000:.1f}조원"
     return f"{numeric / 100_000_000:,.0f}억원"
 
 
 def format_outstanding_shares(value) -> str:
-    return NA_TEXT if is_missing(value) else f"{int(round(float(value))):,}주"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{int(round(numeric)):,}주"
 
 
 def format_flow_amount(value) -> str:
-    if is_missing(value):
+    numeric = safe_float(value)
+    if numeric is None:
         return NA_TEXT
-    eok = float(value) / 100_000_000
-    label = "순매수" if eok >= 0 else "순매도"
-    return f"{label} {eok:+,.0f}억원"
+    eok = numeric / 100_000_000
+    action = "순매수" if eok >= 0 else "순매도"
+    return f"{action} {abs(eok):,.0f}억원"
 
 
 def format_flow_generic(value) -> str:
-    if is_missing(value):
+    numeric = safe_float(value)
+    if numeric is None:
         return NA_TEXT
-    numeric = float(value)
-    label = "순매수" if numeric >= 0 else "순매도"
-    return f"{label} {numeric:+,.0f}"
+    action = "순매수" if numeric >= 0 else "순매도"
+    return f"{action} {abs(numeric):,.0f}"
 
 
 def format_multiple(value, suffix: str) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):.1f}{suffix}"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{numeric:.1f}{suffix}"
 
 
 def format_signed_multiple(value, suffix: str) -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):+.2f}{suffix}"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{numeric:+.2f}{suffix}"
 
 
 def format_ratio_metric(value, suffix: str = "%") -> str:
-    return NA_TEXT if is_missing(value) else f"{float(value):.1f}{suffix}"
+    numeric = safe_float(value)
+    return NA_TEXT if numeric is None else f"{numeric:.1f}{suffix}"
+
+
+def format_sections_list(values: Iterable[str] | None) -> str:
+    cleaned = [str(value).strip() for value in (values or []) if str(value).strip()]
+    return ", ".join(cleaned) if cleaned else "없음"
+
+
+def clean_sentence(text: str) -> str:
+    value = " ".join(str(text or "").strip().split())
+    if not value:
+        return ""
+    if value.endswith((".", "!", "?")):
+        return value
+    return f"{value}."
+
+
+def join_sentences(parts: Iterable[str], limit: int | None = None) -> str:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        sentence = clean_sentence(part)
+        if not sentence or sentence in seen:
+            continue
+        seen.add(sentence)
+        cleaned.append(sentence)
+        if limit is not None and len(cleaned) >= limit:
+            break
+    return " ".join(cleaned)
+
+
+def add_section(lines: list[str], number: int, title: str, body: Iterable[str]) -> int:
+    body_lines = [str(line) for line in body if str(line).strip()]
+    if not body_lines:
+        return number
+    if lines:
+        lines.append("")
+    lines.append(f"{number}. {title}")
+    lines.extend(body_lines)
+    return number + 1

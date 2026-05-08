@@ -4,13 +4,13 @@ from src.signals.watchlist_morning import build_watchlist_morning_scores
 
 
 class WatchlistMorningTests(unittest.TestCase):
-    def test_component_scores_affect_label(self):
+    def test_component_scores_affect_signal_label(self):
         rows = build_watchlist_morning_scores(
             [
                 {
                     "symbol": "005930",
-                    "name": "Samsung Electronics",
-                    "sector_group": "Semiconductor",
+                    "name": "삼성전자",
+                    "sector_group": "반도체",
                     "close_price": 80000,
                     "return_5d": 0.03,
                     "return_20d": 0.08,
@@ -24,16 +24,16 @@ class WatchlistMorningTests(unittest.TestCase):
                     "data_status": "FRESH",
                 }
             ],
-            {"market_tone": "우호"},
-            [{"sector_group": "반도체", "label": "우호", "score": 80, "intraday_checkpoints": ["SOX 연동 확인"]}],
+            {"regime_label": "Risk-on"},
+            [{"sector_group": "반도체", "label": "우호", "score": 80}],
         )
-        self.assertIn(rows[0]["label"], {"우호", "중립~우호"})
+        self.assertIn(rows[0]["signal_label"], {"비중확대 후보", "보유·관찰"})
         self.assertNotEqual(rows[0]["quant_reasons"][0], rows[0]["positive_factors"][0])
 
     def test_buy_hold_sell_not_used(self):
         rows = build_watchlist_morning_scores(
-            [{"symbol": "005930", "name": "Samsung Electronics", "sector_group": "Semiconductor", "close_price": 80000, "data_status": "FRESH"}],
-            {"market_tone": "중립"},
+            [{"symbol": "005930", "name": "삼성전자", "sector_group": "반도체", "close_price": 80000, "data_status": "FRESH"}],
+            {"regime_label": "Neutral"},
             [],
         )
         serialized = str(rows[0]).upper()
@@ -43,12 +43,12 @@ class WatchlistMorningTests(unittest.TestCase):
 
     def test_missing_data_keeps_watchlist_row(self):
         rows = build_watchlist_morning_scores(
-            [{"symbol": "017670", "name": "SK Telecom", "sector_group": "Telecom", "close_price": None, "data_status": "DATA_MISSING"}],
-            {"market_tone": "중립"},
+            [{"symbol": "017670", "name": "SK텔레콤", "sector_group": "통신", "close_price": None, "data_status": "DATA_MISSING"}],
+            {"regime_label": "Neutral"},
             [],
         )
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["label"], "데이터 부족")
+        self.assertEqual(rows[0]["signal_label"], "판단 유보")
 
     def test_core_priority_is_preferred(self):
         rows = build_watchlist_morning_scores(
@@ -56,7 +56,7 @@ class WatchlistMorningTests(unittest.TestCase):
                 {"symbol": "071050", "name": "한국금융지주", "sector_group": "금융/증권", "close_price": 1, "return_5d": 0.01, "trading_value_ratio_20d": 1.2, "foreign_net_buy": 1, "institutional_net_buy": 1, "roe": 10, "debt_ratio": 40, "data_status": "FRESH"},
                 {"symbol": "999999", "name": "기타종목", "sector_group": "금융/증권", "close_price": 1, "return_5d": 0.01, "trading_value_ratio_20d": 1.2, "foreign_net_buy": 1, "institutional_net_buy": 1, "roe": 10, "debt_ratio": 40, "data_status": "FRESH"},
             ],
-            {"market_tone": "중립"},
+            {"regime_label": "Neutral"},
             [{"sector_group": "금융/증권", "label": "중립", "score": 55}],
         )
         self.assertEqual(rows[0]["symbol"], "071050")

@@ -38,8 +38,6 @@ class SupabaseStockDataReader:
         self.client = self.base_reader.client
 
     def get_report_contract_bundle(self, report_type: str = "morning", target_date: str | None = None) -> dict:
-        if report_type != "morning":
-            raise ValueError("Only morning contract bundle is supported here.")
         freshness = self.get_report_data_freshness(target_date)
         macro = self.get_morning_macro_snapshot(target_date)
         sector_etfs = self.get_sector_etf_signals(target_date)
@@ -63,7 +61,7 @@ class SupabaseStockDataReader:
             failed_views.append("report_watchlist_snapshot_view")
         if any(row.get("contract_fallback_used") for row in rankings):
             failed_views.append("report_market_ranking_view")
-        readiness = self.base_reader.fetch_stockdata_report_readiness(target_date)
+        readiness = self.normalize_report_readiness(self.base_reader.fetch_stockdata_report_readiness(target_date))
         return {
             "freshness": freshness,
             "macro": macro,
@@ -73,6 +71,106 @@ class SupabaseStockDataReader:
             "readiness": readiness,
             "contract_fallback_used": fallback_used,
             "contract_failed_views": failed_views,
+        }
+
+    def normalize_report_readiness(self, readiness: dict | None) -> dict:
+        raw = dict(readiness or {})
+        kr_full_market_price_ready = bool(raw.get("kr_full_market_price_ready"))
+        kis_universe_ready = bool(raw.get("kis_universe_ready"))
+        kis_volume_ranking_ready = bool(raw.get("kis_volume_ranking_ready"))
+        kr_trading_value_ranking_ready = bool(raw.get("kr_trading_value_ranking_ready")) and kr_full_market_price_ready
+        kr_market_cap_ranking_ready = bool(raw.get("kr_market_cap_ranking_ready")) and kr_full_market_price_ready
+        etf_etn_ready = bool(raw.get("etf_etn_ready", True))
+
+        allowed = set(raw.get("report_allowed_sections") or [])
+        blocked = set(raw.get("report_blocked_sections") or [])
+        allowed.update({"macro", "us_market"})
+
+        if kis_volume_ranking_ready:
+            allowed.add("kis_volume_top")
+            blocked.discard("kis_volume_top")
+        else:
+            blocked.add("kis_volume_top")
+            allowed.discard("kis_volume_top")
+
+        if kis_universe_ready:
+            allowed.add("watchlist_signal")
+            blocked.discard("watchlist_signal")
+        else:
+            blocked.add("watchlist_signal")
+            allowed.discard("watchlist_signal")
+
+        if etf_etn_ready:
+            allowed.add("etf_etn")
+            blocked.discard("etf_etn")
+        else:
+            blocked.add("etf_etn")
+            allowed.discard("etf_etn")
+
+        if kr_trading_value_ranking_ready:
+            allowed.add("kr_full_market_trading_value_top")
+            blocked.discard("kr_full_market_trading_value_top")
+        else:
+            blocked.add("kr_full_market_trading_value_top")
+            allowed.discard("kr_full_market_trading_value_top")
+
+        if kr_market_cap_ranking_ready:
+            allowed.add("kr_full_market_market_cap_top")
+            blocked.discard("kr_full_market_market_cap_top")
+        else:
+            blocked.add("kr_full_market_market_cap_top")
+            allowed.discard("kr_full_market_market_cap_top")
+
+        if kr_full_market_price_ready:
+            display_mode = "FULL_MARKET"
+        elif kis_universe_ready or kis_volume_ranking_ready:
+            display_mode = "KIS_UNIVERSE_ONLY"
+        else:
+            display_mode = "MACRO_ONLY"
+
+        if not kr_full_market_price_ready and kis_volume_ranking_ready and kis_universe_ready:
+            data_limitation_note = (
+                "국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다. "
+                "거래량 상위는 KIS ranking 기준, 종목 점검은 관심종목·KIS 후보군 기준으로 제공합니다."
+            )
+        elif not kr_full_market_price_ready and kis_universe_ready:
+            data_limitation_note = (
+                "국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다. "
+                "국내 종목 점검은 관심종목·KIS 후보군 기준으로 제한 제공합니다."
+            )
+        elif not kr_full_market_price_ready:
+            data_limitation_note = (
+                "국내 전종목 및 관심종목 데이터가 충분하지 않아 국내 종목 섹션은 축소하고, "
+                "매크로와 미국장 영향 중심으로 제공합니다."
+            )
+        else:
+            data_limitation_note = raw.get("data_limitation_note") or ""
+
+        allowed_korean_sections = [
+            name
+            for name in ("kis_volume_top", "watchlist_signal", "etf_etn")
+            if name in allowed
+        ]
+        blocked_korean_sections = [
+            name
+            for name in ("kr_full_market_trading_value_top", "kr_full_market_market_cap_top")
+            if name in blocked
+        ]
+
+        return {
+            **raw,
+            "kr_full_market_price_ready": kr_full_market_price_ready,
+            "kis_universe_ready": kis_universe_ready,
+            "kis_volume_ranking_ready": kis_volume_ranking_ready,
+            "kr_trading_value_ranking_ready": kr_trading_value_ranking_ready,
+            "kr_market_cap_ranking_ready": kr_market_cap_ranking_ready,
+            "etf_etn_ready": etf_etn_ready,
+            "report_allowed_sections": sorted(allowed),
+            "report_blocked_sections": sorted(blocked),
+            "data_limitation_note": data_limitation_note,
+            "display_mode": display_mode,
+            "allowed_korean_sections": allowed_korean_sections,
+            "blocked_korean_sections": blocked_korean_sections,
         }
 
     def get_report_data_freshness(self, target_date: str | None = None) -> dict:

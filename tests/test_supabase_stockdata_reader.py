@@ -53,6 +53,23 @@ class SupabaseStockDataReaderTests(unittest.TestCase):
         self.assertIsNone(rate)
         self.assertTrue(any("anomaly" in warning for warning in warnings))
 
+    def test_normalize_readiness_derives_blocked_sections(self):
+        normalized = self.reader.normalize_report_readiness(
+            {
+                "kr_full_market_price_ready": False,
+                "kis_universe_ready": True,
+                "kis_volume_ranking_ready": True,
+                "kr_trading_value_ranking_ready": True,
+                "kr_market_cap_ranking_ready": True,
+                "report_allowed_sections": ["macro", "us_market"],
+                "report_blocked_sections": [],
+            }
+        )
+        self.assertEqual(normalized["display_mode"], "KIS_UNIVERSE_ONLY")
+        self.assertIn("kr_full_market_trading_value_top", normalized["report_blocked_sections"])
+        self.assertIn("kr_full_market_market_cap_top", normalized["report_blocked_sections"])
+        self.assertIn("watchlist_signal", normalized["report_allowed_sections"])
+
 
 if __name__ == "__main__":
     unittest.main()
