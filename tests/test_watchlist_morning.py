@@ -27,7 +27,7 @@ class WatchlistMorningTests(unittest.TestCase):
             {"regime_label": "Risk-on"},
             [{"sector_group": "반도체", "label": "우호", "score": 80}],
         )
-        self.assertIn(rows[0]["signal_label"], {"비중확대 후보", "보유·관찰"})
+        self.assertIn(rows[0]["signal_label"], {"강한 모멘텀 후보", "보유·관찰"})
         self.assertNotEqual(rows[0]["quant_reasons"][0], rows[0]["positive_factors"][0])
 
     def test_buy_hold_sell_not_used(self):

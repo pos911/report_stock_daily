@@ -2,6 +2,8 @@ import unittest
 
 from src.utils.formatters import (
     NA_TEXT,
+    detect_market_value_anomaly,
+    detect_stock_price_anomaly,
     format_bp,
     format_index,
     format_market_cap,
@@ -45,6 +47,15 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_spread_bp(50.2), "+50.2bp")
         self.assertEqual(format_bp(-20.5), "-20.5bp")
         self.assertEqual(format_spread_bp(None), NA_TEXT)
+
+    def test_market_anomaly_warning(self):
+        self.assertIsNotNone(detect_market_value_anomaly("KOSPI", 7498))
+        self.assertIsNone(detect_market_value_anomaly("KOSPI", 2700))
+
+    def test_stock_price_anomaly_warning(self):
+        self.assertIsNotNone(detect_stock_price_anomaly("005930", "삼성전자", 268500))
+        self.assertIsNotNone(detect_stock_price_anomaly("000660", "SK하이닉스", 1_686_000))
+        self.assertIsNone(detect_stock_price_anomaly("005930", "삼성전자", 68000))
 
 
 if __name__ == "__main__":

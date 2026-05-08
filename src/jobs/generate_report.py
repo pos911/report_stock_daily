@@ -19,6 +19,8 @@ from src.services.supabase_stockdata_reader import SupabaseStockDataReader
 from src.utils.formatters import (
     NA_TEXT,
     add_section,
+    detect_market_value_anomaly,
+    detect_stock_price_anomaly,
     format_number,
     format_pct,
     format_price,
@@ -26,6 +28,7 @@ from src.utils.formatters import (
     join_sentences,
     safe_change_rate,
     safe_float,
+    unique_warnings,
 )
 
 
@@ -112,7 +115,7 @@ def _interpret_us_10y_3y_spread(us10y, us3y) -> dict | None:
         plain = "정상 곡선 구간으로 성장 기대와 기간 프리미엄을 함께 봅니다."
     elif spread_bp > -25:
         regime = "flat"
-        plain = "경기와 정책 기대가 혼재된 평탄 구간입니다."
+        plain = "경기와 정책 기대가 혼재된 구간입니다."
     elif spread_bp > -75:
         regime = "mildly_inverted"
         plain = "완만한 역전 구간으로 경기 둔화 우려를 함께 봅니다."
@@ -166,11 +169,11 @@ def _score_watchlist_snapshot(snapshot: dict, ranking_lookup: dict, macro: dict)
     if close_price is None:
         label = "판단 유보"
     elif score >= 4:
-        label = "비중확대 후보"
+        label = "강한 모멘텀 후보"
     elif score >= 1:
         label = "보유·관찰"
     elif score <= -2:
-        label = "리스크 축소 후보"
+        label = "리스크 관리 후보"
     else:
         label = "관망"
 
@@ -210,6 +213,7 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     lines = [f"[{title} | {report_date}]"]
     section_no = 1
 
+    scale_warning = _collect_scale_warning(macro, watchlist)
     state_body = [
         f"- 한국장: {'개장' if freshness.get('xkrx_is_open') else '휴장'}",
         f"- 미국장: {'개장' if freshness.get('xnys_is_open') else '휴장'}",
@@ -217,14 +221,16 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
         f"- 사용 가능: {format_sections_list(readiness.get('allowed_korean_sections') or [])}",
         f"- 생략: {format_sections_list(_translate_blocked(readiness.get('blocked_korean_sections') or []))}",
     ]
+    if scale_warning:
+        state_body.append(f"- 참고: {scale_warning}")
     section_no = add_section(lines, section_no, "시장 상태" if report_type == "regular" else "마감 데이터 상태", state_body)
 
     summary_title = "장중 핵심 요약" if report_type == "regular" else "마감 요약"
     summary_body = [
-        f"- KOSPI: {format_number(macro.get('kospi'))}",
-        f"- KOSDAQ: {format_number(macro.get('kosdaq'))}",
-        f"- USD/KRW: {format_number(macro.get('usdkrw'))}",
-        f"- 한 줄 판단: {_build_session_summary(report_type, macro, readiness)}",
+        f"- KOSPI: {format_number(macro.get('kospi')) if safe_float(macro.get('kospi')) is not None else '미확인'}",
+        f"- KOSDAQ: {format_number(macro.get('kosdaq')) if safe_float(macro.get('kosdaq')) is not None else '미확인'}",
+        f"- USD/KRW: {format_number(macro.get('usdkrw')) if safe_float(macro.get('usdkrw')) is not None else '미확인'}",
+        f"- 한 줄 요약: {_build_session_summary(report_type, macro, readiness, rankings, watchlist)}",
     ]
     section_no = add_section(lines, section_no, summary_title, summary_body)
 
@@ -292,26 +298,31 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     return "\n".join(lines).strip() + "\n"
 
 
-def _build_session_summary(report_type: str, macro: dict, readiness: dict) -> str:
+def _build_session_summary(report_type: str, macro: dict, readiness: dict, rankings: list[dict], watchlist: list[dict]) -> str:
     usdkrw = safe_float(macro.get("usdkrw"))
-    kospi = safe_float(macro.get("kospi"))
-    kosdaq = safe_float(macro.get("kosdaq"))
-    parts = []
-    if kospi is not None and kosdaq is not None:
-        parts.append("국내 지수 흐름과 환율을 함께 보는 구간입니다")
-    if usdkrw is not None and usdkrw >= 1450:
-        parts.append("환율 부담이 커지면 성장주 대응은 보수적으로 보는 편이 좋습니다")
-    if "kis_volume_top" in (readiness.get("report_allowed_sections") or []):
-        parts.append("KIS 거래량 상위의 지속성과 관심종목 Signal 변화가 핵심입니다")
-    if report_type == "closing":
-        parts.append("마감 기준으로는 다음 거래일 후보군 압축이 중요합니다")
-    return join_sentences(parts, limit=2) or "핵심 지표 중심으로 점검합니다."
+    if report_type == "regular":
+        if usdkrw is not None and usdkrw >= 1450:
+            return "환율 1,450원대가 유지되는 동안 성장주 추격은 제한하고, KIS 거래량 상위 지속 여부와 관심종목 Signal 변화만 선별 확인합니다."
+        return "환율 부담이 제한적이면 KIS 거래량 상위 지속 여부와 관심종목 Signal 개선 종목을 우선 확인합니다."
+
+    volume_names = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:3]
+    strong_watch = []
+    for row in watchlist[:5]:
+        derived = _derive_watchlist_signal(row)
+        label = row.get("signal_label") or derived["label"]
+        if label in {"강한 모멘텀 후보", "보유·관찰"}:
+            strong_watch.append(row.get("name") or row.get("symbol"))
+    if volume_names and strong_watch:
+        return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)}와 관심종목 후보군 {'·'.join(strong_watch[:2])} 중심으로 마감 복기를 제공합니다."
+    if volume_names:
+        return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)} 중심으로만 마감 복기를 제공합니다."
+    return "오늘은 KIS 거래량 상위와 관심종목 후보군 중심으로만 마감 복기를 제공합니다."
 
 
 def _build_non_morning_checkpoints(report_type: str, readiness: dict) -> list[str]:
     if report_type == "closing":
         return [
-            "- 미국장 확인 항목과 환율 방향 재점검",
+            "- 미국장 확인 항목과 환율 방향 사전 점검",
             "- KIS ranking 후보 지속 여부 확인",
             "- 관심종목 리스크와 다음 거래일 대응 조건 정리",
         ]
@@ -345,16 +356,27 @@ def _derive_watchlist_signal(row: dict) -> dict:
         score += 4 if inst_flow > 0 else -4 if inst_flow < 0 else 0
 
     if score >= 75:
-        label = "비중확대 후보"
+        label = "강한 모멘텀 후보"
     elif score >= 60:
         label = "보유·관찰"
     elif score >= 45:
         label = "관망"
     elif score >= 30:
-        label = "리스크 축소 후보"
+        label = "리스크 관리 후보"
     else:
         label = "판단 유보"
     return {"score": max(0.0, min(100.0, score)), "label": label}
+
+
+def _collect_scale_warning(macro: dict, watchlist: list[dict]) -> str:
+    warnings = [
+        detect_market_value_anomaly("KOSPI", macro.get("kospi")),
+        detect_market_value_anomaly("KOSDAQ", macro.get("kosdaq")),
+    ]
+    for row in watchlist[:10]:
+        warnings.append(detect_stock_price_anomaly(row.get("symbol"), row.get("name"), row.get("close_price")))
+    unique = unique_warnings(warnings, limit=1)
+    return unique[0] if unique else ""
 
 
 def _translate_blocked(values: list[str]) -> list[str]:

@@ -60,6 +60,8 @@ class MorningReportTests(unittest.TestCase):
                 "advancing_ratio": 0.58,
                 "kospi_foreign_net_buy": 1,
                 "kospi_institutional_net_buy": 1,
+                "kospi": 7498,
+                "kosdaq": 880,
             },
             "sector_etfs": [
                 {
@@ -92,31 +94,13 @@ class MorningReportTests(unittest.TestCase):
                     "institutional_net_buy": -2,
                     "warnings": [],
                 },
-                {
-                    "symbol": "462330",
-                    "name": "KODEX 2차전지산업레버리지",
-                    "sector_group": "2차전지",
-                    "theme_group": "2차전지",
-                    "role": "satellite",
-                    "exclude_from_signal": True,
-                    "data_status": "FRESH",
-                    "change_rate_1d": 0.08,
-                    "return_20d": 0.30,
-                    "trading_value_ratio_20d": 2.0,
-                    "warnings": [],
-                },
             ],
             "watchlist": [
-                {"symbol": "000660", "name": "SK하이닉스", "market": "KOSPI", "sector_group": "반도체", "close_price": 210000, "return_5d": 0.1812, "return_20d": 0.26, "return_60d": 0.40, "trading_value_ratio_20d": 2.89, "foreign_net_buy": 12, "institutional_net_buy": 2, "roe": 18, "debt_ratio": 25, "short_ratio": 1, "data_status": "FRESH"},
-                {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "sector_group": "반도체", "close_price": 80000, "return_5d": 0.0592, "return_20d": 0.2040, "return_60d": 0.24, "trading_value_ratio_20d": 1.48, "foreign_net_buy": 10, "institutional_net_buy": 4, "roe": 15, "debt_ratio": 20, "short_ratio": 1, "data_status": "FRESH"},
+                {"symbol": "000660", "name": "SK하이닉스", "market": "KOSPI", "sector_group": "반도체", "close_price": 1686000, "return_5d": 0.1812, "return_20d": 0.26, "return_60d": 0.40, "trading_value_ratio_20d": 2.89, "foreign_net_buy": 12, "institutional_net_buy": 2, "roe": 18, "debt_ratio": 25, "short_ratio": 1, "data_status": "FRESH"},
+                {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "sector_group": "반도체", "close_price": 268500, "return_5d": 0.0592, "return_20d": 0.2040, "return_60d": 0.24, "trading_value_ratio_20d": 1.48, "foreign_net_buy": 10, "institutional_net_buy": 4, "roe": 15, "debt_ratio": 20, "short_ratio": 1, "data_status": "FRESH"},
                 {"symbol": "071050", "name": "한국금융지주", "market": "KOSPI", "sector_group": "금융/증권", "close_price": 100000, "return_5d": 0.0116, "return_20d": 0.2358, "return_60d": 0.3113, "trading_value_ratio_20d": 1.10, "foreign_net_buy": 3, "institutional_net_buy": 1, "roe": 14, "debt_ratio": 160, "short_ratio": 5.2, "data_status": "FRESH"},
-                {"symbol": "278470", "name": "에이피알", "market": "KOSPI", "sector_group": "화장품/소비재", "close_price": 60000, "return_5d": -0.0478, "return_20d": 0.3104, "return_60d": 0.5639, "trading_value_ratio_20d": 1.30, "foreign_net_buy": -2, "institutional_net_buy": -1, "roe": 18, "debt_ratio": 40, "short_ratio": 1.2, "data_status": "FRESH"},
-                {"symbol": "058470", "name": "리노공업", "market": "KOSDAQ", "sector_group": "반도체 장비", "close_price": 100000, "return_5d": -0.0289, "return_20d": 0.0942, "return_60d": 0.2756, "trading_value_ratio_20d": 1.10, "foreign_net_buy": -1, "institutional_net_buy": -1, "roe": 12, "debt_ratio": 60, "short_ratio": 1.0, "data_status": "FRESH"},
-                {"symbol": "012330", "name": "현대모비스", "market": "KOSPI", "sector_group": "자동차", "close_price": 260000, "return_5d": 0.0213, "return_20d": 0.1107, "return_60d": 0.15, "trading_value_ratio_20d": 0.80, "foreign_net_buy": 5, "institutional_net_buy": -2, "roe": 13, "debt_ratio": 40, "short_ratio": 1, "data_status": "FRESH"},
             ],
-            "rankings": [
-                {"symbol": "005930", "name": "삼성전자", "rank_type": "volume", "rank": 1, "source": "KIS", "market": "KOSPI"},
-            ],
+            "rankings": [{"symbol": "005930", "name": "삼성전자", "rank_type": "volume", "rank": 1, "source": "KIS", "market": "KOSPI"}],
             "readiness": {
                 "kr_full_market_price_ready": False,
                 "kis_universe_ready": True,
@@ -157,6 +141,10 @@ class MorningReportTests(unittest.TestCase):
         self.assertNotIn("ETF 1일 모멘텀", judgment)
         self.assertIn("다음 거래일", judgment)
 
+    def test_scale_warning_is_included_once(self):
+        text = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"]
+        self.assertEqual(text.count("일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."), 1)
+
     def test_snapshot_contains_readiness_fields(self):
         snapshot = generate_morning_brief(self._bundle(), "2026-05-05")["snapshot"]
         for key in [
@@ -168,6 +156,7 @@ class MorningReportTests(unittest.TestCase):
             "kis_universe_ready",
             "display_mode",
             "data_limitation_note",
+            "scale_warnings",
         ]:
             self.assertIn(key, snapshot)
 

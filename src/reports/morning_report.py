@@ -12,6 +12,7 @@ from src.reports.morning_sections import (
     build_priority_themes_section,
     build_risk_section,
     build_watchlist_section,
+    collect_scale_warnings,
 )
 from src.signals.morning_regime import build_global_morning_regime
 from src.signals.sector_impact import build_sector_morning_impacts
@@ -32,10 +33,11 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     sector_impacts = build_sector_morning_impacts(regime, sector_etfs, rankings, watchlist)
     top_sectors = [row for row in sector_impacts if row.get("label") != "데이터 부족"][:3]
     watchlist_scores = build_watchlist_morning_scores(watchlist, regime, sector_impacts)
+    scale_warnings = collect_scale_warnings(macro, watchlist_scores)
 
     lines = [f"[Morning Brief | {report_date}]"]
     section_no = 1
-    section_no = add_section(lines, section_no, "데이터 상태", build_data_status_section(freshness, readiness, contract_failed_views))
+    section_no = add_section(lines, section_no, "데이터 상태", build_data_status_section(freshness, readiness, contract_failed_views, scale_warnings))
     section_no = add_section(lines, section_no, "오늘의 한 줄 판단", build_one_line_judgment_section(regime, top_sectors, freshness, readiness))
     section_no = add_section(lines, section_no, "야간 글로벌 시장", build_global_market_section(macro))
     section_no = add_section(lines, section_no, "한국장 예상 영향", build_korean_impact_section(top_sectors, freshness, readiness))
@@ -57,10 +59,11 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
         "top_sectors": top_sectors or [{"label": "중립", "sector_group": "주요 테마"}],
         "sector_etf_signals": sector_etfs or [{"label": "미확인"}],
         "watchlist_morning_scores": watchlist_scores or [{"signal_label": "판단 유보"}],
-        "risk_flags": [line[2:] for line in build_risk_section(regime, top_sectors, watchlist_scores, freshness, readiness)] or ["리스크 요인 점검"],
+        "risk_flags": [line[2:] for line in build_risk_section(regime, top_sectors, watchlist_scores, freshness, readiness)] or ["리스크 요인 없음"],
         "intraday_checkpoints": [line[2:] for line in build_checkpoints_section(top_sectors, freshness, readiness)] or ["체크포인트 없음"],
         "data_freshness_manifest": freshness,
         "watchlist_coverage_status": freshness.get("watchlist_coverage_status"),
+        "scale_warnings": scale_warnings,
         "stockdata_readiness": readiness,
         "report_allowed_sections": readiness.get("report_allowed_sections") or [],
         "report_blocked_sections": readiness.get("report_blocked_sections") or [],

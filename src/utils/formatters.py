@@ -158,6 +158,52 @@ def format_sections_list(values: Iterable[str] | None) -> str:
     return ", ".join(cleaned) if cleaned else "없음"
 
 
+def detect_market_value_anomaly(label: str, value: float | int | str | None) -> str | None:
+    numeric = safe_float(value)
+    if numeric is None:
+        return None
+    normalized = str(label or "").strip().upper()
+    if normalized == "KOSPI" and (numeric < 1000 or numeric > 5500):
+        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    if normalized == "KOSDAQ" and (numeric < 300 or numeric > 1600):
+        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    return None
+
+
+def detect_stock_price_anomaly(symbol: str | None, name: str | None, price: float | int | str | None) -> str | None:
+    numeric = safe_float(price)
+    if numeric is None:
+        return None
+    symbol_text = str(symbol or "").strip()
+    name_text = str(name or "").strip()
+    suspicious_thresholds = {
+        "005930": 200_000,
+        "000660": 1_000_000,
+        "012330": 500_000,
+        "071050": 300_000,
+    }
+    threshold = suspicious_thresholds.get(symbol_text)
+    if threshold is not None and numeric > threshold:
+        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    if name_text in {"삼성전자", "SK하이닉스", "현대모비스", "한국금융지주"} and numeric > 500_000:
+        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    return None
+
+
+def unique_warnings(messages: Iterable[str | None], limit: int | None = None) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        text = str(message or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        results.append(text)
+        if limit is not None and len(results) >= limit:
+            break
+    return results
+
+
 def clean_sentence(text: str) -> str:
     value = " ".join(str(text or "").strip().split())
     if not value:

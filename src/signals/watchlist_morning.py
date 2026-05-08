@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from src.utils.formatters import safe_float
 
 
@@ -43,8 +41,8 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
             "score": 0.0,
             "signal_label": "판단 유보",
             "quant_reasons": ["핵심 수치 확인이 제한적입니다."],
-            "positive_factors": ["데이터 갱신 후 다시 확인하는 편이 좋습니다."],
-            "negative_factors": ["가격과 수급 기준일이 충분하지 않습니다."],
+            "positive_factors": ["데이터 갱신 이후 다시 확인하는 편이 좋습니다."],
+            "negative_factors": ["가격과 수급 기준이 충분하지 않습니다."],
             "intraday_checkpoints": ["다음 거래일 기준 수치 갱신 여부 확인"],
             "core_priority": CORE_PRIORITY.get(str(row.get("symbol") or ""), 999),
             "sector_impact_score": float((sector_impact or {}).get("score") or 0),
@@ -65,16 +63,13 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
     if str(row.get("symbol") or "") in CORE_PRIORITY:
         score += 4
 
-    label = _label(score)
-    checkpoints = _build_checkpoints(row, sector_impact)
-
     return {
         "score": round(max(0.0, min(100.0, score)), 1),
-        "signal_label": label,
+        "signal_label": _label(score),
         "quant_reasons": _dedupe(quant_reasons)[:3],
         "positive_factors": _dedupe(positives)[:3],
         "negative_factors": _dedupe(negatives)[:3],
-        "intraday_checkpoints": checkpoints,
+        "intraday_checkpoints": _build_checkpoints(row, sector_impact),
         "core_priority": CORE_PRIORITY.get(str(row.get("symbol") or ""), 999),
         "sector_impact_score": float((sector_impact or {}).get("score") or 0),
     }
@@ -92,10 +87,11 @@ def _momentum_score(row: dict, quant_reasons: list[str], positives: list[str], n
         elif value < 0:
             delta += max(value * weight * 100, -12)
 
-    if safe_float(row.get("return_5d")) and safe_float(row.get("return_5d")) > 0:
-        positives.append("단기 가격 흐름이 상승 쪽으로 유지되고 있습니다.")
-    elif safe_float(row.get("return_5d")) and safe_float(row.get("return_5d")) < 0:
-        negatives.append("단기 가격 흐름이 약해 반전 확인이 필요합니다.")
+    return_5d = safe_float(row.get("return_5d"))
+    if return_5d is not None and return_5d > 0:
+        positives.append("단기 주가 흐름이 상승 쪽으로 유지되고 있습니다.")
+    elif return_5d is not None and return_5d < 0:
+        negatives.append("단기 주가 흐름이 약해 반전 확인이 필요합니다.")
     return delta
 
 
@@ -111,7 +107,7 @@ def _liquidity_score(row: dict, quant_reasons: list[str], positives: list[str], 
         positives.append("거래대금이 평균보다 개선돼 관심이 유지되고 있습니다.")
         return 8.0
     if ratio < 0.8:
-        negatives.append("거래대금이 평균보다 약해 추세 신뢰도는 낮습니다.")
+        negatives.append("거래대금이 평균보다 약해 추세 신뢰도가 낮습니다.")
         return -8.0
     return 0.0
 
@@ -131,7 +127,7 @@ def _investor_score(row: dict, quant_reasons: list[str], positives: list[str], n
     if inst is not None:
         quant_reasons.append("기관 순매수" if inst > 0 else "기관 순매도" if inst < 0 else "기관 보합")
         if inst > 0:
-            positives.append("기관 수급이 받쳐주면 눌림 구간 방어력이 높아집니다.")
+            positives.append("기관 수급이 받쳐주면 눌림 구간 방어력이 높아질 수 있습니다.")
             delta += 6
         elif inst < 0:
             negatives.append("기관 매도가 겹치면 변동성이 커질 수 있습니다.")
@@ -189,25 +185,25 @@ def _macro_fit(regime: dict, sector_impact: dict | None, positives: list[str], n
 
 
 def _build_checkpoints(row: dict, sector_impact: dict | None) -> list[str]:
-    sector_name = (sector_impact or {}).get("sector_group") or row.get("sector_group") or "관련 섹터"
+    sector_name = (sector_impact or {}).get("sector_group") or row.get("sector_group") or "관심 섹터"
     checkpoints = [f"{sector_name} 거래대금과 수급 지속 여부"]
     ratio = safe_float(row.get("trading_value_ratio_20d"))
     if ratio is not None and ratio >= 2:
-        checkpoints.append("개장 후 거래대금 급증이 유지되는지 확인")
+        checkpoints.append("개장 후 거래대금 급증이 이어지는지 확인")
     else:
-        checkpoints.append("시가 부근에서 호가와 거래대금 반응 확인")
+        checkpoints.append("초반 수급 반응과 거래대금 회복 여부 확인")
     return checkpoints[:2]
 
 
 def _label(score: float) -> str:
     if score >= 75:
-        return "비중확대 후보"
+        return "강한 모멘텀 후보"
     if score >= 60:
         return "보유·관찰"
     if score >= 45:
         return "관망"
     if score >= 30:
-        return "리스크 축소 후보"
+        return "리스크 관리 후보"
     return "판단 유보"
 
 
