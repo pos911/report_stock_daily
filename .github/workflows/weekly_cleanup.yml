@@ -1,8 +1,6 @@
-name: Weekly Cleanup
+name: Weekly Cleanup Manual
 
 on:
-  schedule:
-    - cron: "30 23 * * 6"
   workflow_dispatch:
     inputs:
       dry_run:

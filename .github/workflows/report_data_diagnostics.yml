@@ -1,0 +1,109 @@
+name: Report Data Diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_date:
+        description: "YYYY-MM-DD optional"
+        required: false
+        default: ""
+      include_report_dry_run:
+        description: "Run morning/regular/closing dry-run after verify"
+        required: false
+        default: "false"
+      report_type:
+        description: "morning / regular / closing / all"
+        required: false
+        default: "all"
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Seoul
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+
+      - name: Prepare runtime secrets
+        env:
+          API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
+        run: |
+          python - <<'PY'
+          import json, os
+          raw = os.getenv("API_KEYS_JSON", "")
+          if not raw:
+              raise RuntimeError("API_KEYS_JSON secret is empty.")
+          payload = json.loads(raw)
+
+          def pick(*values):
+              return next((value for value in values if value), "")
+
+          env_map = {
+              "SUPABASE_URL": pick(payload.get("supabase", {}).get("url"), payload.get("supabase_url")),
+              "SUPABASE_KEY": pick(payload.get("supabase", {}).get("service_role_key"), payload.get("supabase_key")),
+              "GEMINI_API_KEY": pick(payload.get("gemini", {}).get("api_key"), payload.get("gemini_api_key"), payload.get("GEMINI_API_KEY")),
+              "TELEGRAM_BOT_TOKEN": pick(payload.get("telegram", {}).get("bot_token"), payload.get("telegram_bot_token"), payload.get("TELEGRAM_BOT_TOKEN")),
+              "TELEGRAM_CHAT_ID": pick(payload.get("telegram", {}).get("chat_id"), payload.get("telegram_chat_id"), payload.get("TELEGRAM_CHAT_ID")),
+          }
+
+          for key in ("SUPABASE_KEY", "GEMINI_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+              value = env_map.get(key)
+              if value:
+                  print(f"::add-mask::{value}")
+
+          required = ("SUPABASE_URL", "SUPABASE_KEY")
+          missing = [key for key in required if not env_map.get(key)]
+          if missing:
+              raise RuntimeError(f"Missing required keys: {', '.join(missing)}")
+
+          with open(".runtime_env", "w", encoding="utf-8") as handle:
+              for key, value in env_map.items():
+                  if not value:
+                      continue
+                  escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+                  handle.write(f'export {key}="{escaped}"\n')
+          PY
+
+      - name: Run verify_data
+        shell: bash
+        run: |
+          source .runtime_env
+          if [[ -n "${{ github.event.inputs.verify_date }}" ]]; then
+            python scripts/verify_data.py --date "${{ github.event.inputs.verify_date }}"
+          else
+            python scripts/verify_data.py
+          fi
+
+      - name: Run report dry-run
+        if: ${{ github.event.inputs.include_report_dry_run == 'true' }}
+        shell: bash
+        run: |
+          source .runtime_env
+          REPORT_DATE="${{ github.event.inputs.verify_date }}"
+          REPORT_TYPE="${{ github.event.inputs.report_type || 'all' }}"
+
+          run_report () {
+            local kind="$1"
+            if [[ -n "$REPORT_DATE" ]]; then
+              python src/jobs/generate_report.py --type "$kind" --date "$REPORT_DATE" --dry-run
+            else
+              python src/jobs/generate_report.py --type "$kind" --dry-run
+            fi
+          }
+
+          if [[ "$REPORT_TYPE" == "all" ]]; then
+            run_report morning
+            run_report regular
+            run_report closing
+          else
+            run_report "$REPORT_TYPE"
+          fi
+
+      - name: Cleanup runtime secrets
+        if: always()
+        run: rm -f .runtime_env
