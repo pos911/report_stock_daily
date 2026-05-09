@@ -152,9 +152,15 @@ def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dic
         f"{lead_sector or '주도 테마'} 중심의 시초가 강세가 이어질 수 있습니다."
     )
     if lead_sector or second_sector:
-        attack.append(
-            f"단, {sector_text(lead_sector, second_sector)}과 연결된 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
-        )
+        combined_sector = sector_text(lead_sector, second_sector)
+        if lead_sector and second_sector:
+            attack.append(
+                f"단, {lead_sector}·{second_sector}와 연결된 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
+            )
+        else:
+            attack.append(
+                f"단, {combined_sector} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
+            )
 
     defensive = []
     defensive.append("환율, 유가, 금리 또는 단기 과열 신호가 겹치면 추격보다 눌림 확인이 우선입니다.")

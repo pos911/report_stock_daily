@@ -275,5 +275,25 @@ class ReportOutputQualityTests(unittest.TestCase):
         self.assertIn("내일의 전략", closing)
 
 
+    def test_banned_grammar_fragments_are_absent(self):
+        morning = generate_morning_brief(self.bundle, "2026-05-08")["report_text"]
+        regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)
+        closing = _build_simple_non_morning_report("closing", "2026-05-08", self.bundle)
+        for text in [morning, regular, closing]:
+            self.assertNotIn("2차전지과", text)
+            self.assertNotIn("은(는)", text)
+            self.assertNotIn("대한전선가", text)
+            self.assertNotIn("부담는", text)
+            self.assertNotIn("기대은", text)
+            self.assertNotIn("있습니다를 바탕으로", text)
+
+    def test_regular_and_closing_explain_conservative_reassessment(self):
+        regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)
+        closing = _build_simple_non_morning_report("closing", "2026-05-08", self.bundle)
+        expected = "장중/마감 Signal은 현재 price/signal 기준의 보수적 재평가입니다."
+        self.assertIn(expected, regular)
+        self.assertIn(expected, closing)
+
+
 if __name__ == "__main__":
     unittest.main()

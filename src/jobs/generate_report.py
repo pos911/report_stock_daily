@@ -271,7 +271,7 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
         section_no = add_section(lines, section_no, volume_title, volume_body)
 
     if "watchlist_signal" in (readiness.get("report_allowed_sections") or []):
-        signal_body = []
+        signal_body = ["- 장중/마감 Signal은 현재 price/signal 기준의 보수적 재평가입니다."]
         for row in watchlist[:5]:
             derived = _derive_watchlist_signal(row)
             parts = [f"- {row.get('name') or row.get('symbol')}({row.get('symbol')})"]
@@ -340,7 +340,7 @@ def _build_non_morning_checkpoints(report_type: str, readiness: dict, macro: dic
     if report_type == "closing":
         top_volume = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:2]
         return [
-            f"- 공격적 조건: {'·'.join(top_volume) if top_volume else 'KIS 거래량 상위'}가 다음 거래일에도 유지되고 관심종목 거래대금이 동반 확대되는지 확인",
+            f"- 공격적 조건: {'·'.join(top_volume) if top_volume else 'KIS 거래량 상위'}이 다음 거래일에도 거래량 상위를 유지하고, 관심종목 거래대금이 동반 확대되는지 확인",
             "- 보수적 조건: 환율과 금리가 다시 상승하면 추격보다 눌림 확인을 우선",
             "- 반드시 확인할 데이터: 미국장 반도체 흐름, USD/KRW, KIS 거래량 상위 지속 여부",
         ]
@@ -374,10 +374,10 @@ def _build_regular_view_check_section(bundle: dict) -> list[str]:
         lines.append(f"- 유지 여부: KIS 거래량 상위는 {'·'.join(volume_names)} 중심으로 확인됩니다.")
     if maintain:
         names = "·".join(row.get("name") or row.get("symbol") for row in maintain)
-        lines.append(f"- 관심종목 반응: {names}은(는) 상대 강도 확인 구간입니다.")
+        lines.append(f"- 관심종목 반응: {names}는 상대 강도 확인 구간입니다.")
     if mixed_or_stale:
         names = "·".join((row.get("name") or row.get("symbol")) for row in mixed_or_stale[:2])
-        lines.append(f"- 확인 필요: {names}은(는) 원천 혼합 또는 기준일 차이로 보수적 해석이 필요합니다.")
+        lines.append(f"- 확인 필요: {names}는 원천 혼합 또는 기준일 차이로 보수적 해석이 필요합니다.")
     return lines
 
 
