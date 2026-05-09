@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 from typing import List
 
 import requests
@@ -7,6 +10,7 @@ from src.utils import config
 
 TELEGRAM_MSG_LIMIT = 4096
 TELEGRAM_SEND_TIMEOUT = 30
+logger = logging.getLogger(__name__)
 
 
 class TelegramSender:
@@ -22,6 +26,13 @@ class TelegramSender:
         self.api_base = f"https://api.telegram.org/bot{self.bot_token}"
         self.session = requests.Session()
 
+    @staticmethod
+    def mask_chat_id(chat_id: str | None) -> str:
+        text = str(chat_id or "")
+        if len(text) <= 4:
+            return "****"
+        return f"{'*' * (len(text) - 4)}{text[-4:]}"
+
     def _send_single_message(self, text: str) -> bool:
         url = f"{self.api_base}/sendMessage"
         payload = {
@@ -33,18 +44,24 @@ class TelegramSender:
         if response.status_code == 200:
             return True
 
-        print(f"Telegram API error: {response.status_code} - {response.text}")
+        logger.warning("Telegram API error status=%s", response.status_code)
         return False
 
     def send_report(self, report_text: str) -> bool:
         if not report_text or not report_text.strip():
-            print("Empty report text, skipping Telegram send.")
+            logger.info("telegram_send_attempted=false telegram_skip_reason=empty_report_text")
             return False
 
         chunks = self._build_message_chunks(report_text)
+        logger.info(
+            "telegram_config_present=true telegram_send_attempted=true telegram_chat_id=%s chunks=%s",
+            self.mask_chat_id(self.chat_id),
+            len(chunks),
+        )
         success = True
         for chunk in chunks:
             success = self._send_single_message(chunk) and success
+        logger.info("telegram_send_success=%s", str(success).lower())
         return success
 
     @classmethod
@@ -57,7 +74,7 @@ class TelegramSender:
     @staticmethod
     def _normalize_report_text(report_text: str) -> str:
         text = report_text.replace("\r\n", "\n").strip()
-        banned_fragments = ("Test_only", "섹션 수:", "Sections:")
+        banned_fragments = ("Test_only", "섹션 수", "Sections:")
         lines = []
         for line in text.splitlines():
             stripped = line.strip()
@@ -96,4 +113,3 @@ class TelegramSender:
             remaining = remaining[split_pos:].lstrip()
 
         return [chunk for chunk in chunks if chunk]
-

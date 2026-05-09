@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "30 23 * * 6"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run cleanup in dry-run mode"
+        required: false
+        default: "true"
 
 jobs:
   cleanup-raw:
@@ -14,15 +19,40 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - name: Inject runtime secrets
+      - name: Prepare runtime secrets
         env:
           API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
         run: |
           python - <<'PY'
           import json, os
-          payload = json.loads(os.environ["API_KEYS_JSON"])
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
-              env_file.write(f"SUPABASE_URL={payload['supabase']['url']}\n")
-              env_file.write(f"SUPABASE_SERVICE_ROLE_KEY={payload['supabase']['service_role_key']}\n")
+          raw = os.getenv("API_KEYS_JSON", "")
+          if not raw:
+              raise RuntimeError("API_KEYS_JSON secret is empty.")
+          payload = json.loads(raw)
+          env_map = {
+              "SUPABASE_URL": payload["supabase"]["url"],
+              "SUPABASE_SERVICE_ROLE_KEY": payload["supabase"]["service_role_key"],
+              "SUPABASE_KEY": payload["supabase"]["service_role_key"],
+          }
+          for key in ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY"):
+              value = env_map.get(key)
+              if value:
+                  print(f"::add-mask::{value}")
+          with open(".runtime_env", "w", encoding="utf-8") as handle:
+              for key, value in env_map.items():
+                  if value:
+                      escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+                      handle.write(f'export {key}="{escaped}"\n')
           PY
-      - run: python scripts/cleanup_raw_tables.py
+      - name: Cleanup raw tables
+        shell: bash
+        run: |
+          source .runtime_env
+          if [[ "${{ github.event.inputs.dry_run || 'true' }}" == "true" ]]; then
+            python scripts/cleanup_raw_tables.py --dry-run
+          else
+            python scripts/cleanup_raw_tables.py
+          fi
+      - name: Cleanup runtime secrets
+        if: always()
+        run: rm -f .runtime_env

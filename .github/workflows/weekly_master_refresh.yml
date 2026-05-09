@@ -1,4 +1,4 @@
-name: Weekly Master Refresh Policy
+name: Weekly Master Refresh Audit
 
 on:
   schedule:

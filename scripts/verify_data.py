@@ -148,26 +148,40 @@ def build_verification_report(check_date: str) -> dict:
         ),
     )
 
+    excluded_symbols = {
+        item["symbol"]
+        for item in required_etfs
+        if item.get("exclude_from_signal")
+    }
     exclusion_violations = [
         row["symbol"]
         for row in etf_view_rows
-        if row.get("exclude_from_signal") is False and str(row.get("symbol")) in {item["symbol"] for item in required_etfs if item.get("exclude_from_signal")}
+        if row.get("exclude_from_signal") is False and str(row.get("symbol")) in excluded_symbols
     ]
     exclusion_result = {
         "status": "FAIL" if exclusion_violations else "PASS",
         "violations": exclusion_violations,
     }
 
-    results = {
+    status_results = {
         "etf_coverage": etf_result,
         "macro_freshness": macro_result,
         "watchlist_coverage": watchlist_result,
         "ranking_freshness": ranking_result,
         "raw_retention": raw_retention_result,
         "signal_exclusion": exclusion_result,
-        "freshness_view_rows": freshness_rows,
     }
-    results["overall_status"] = classify_overall_status(results.values())
+    diagnostics = {
+        "freshness_view_rows": freshness_rows,
+        "ranking_rows_count": len(ranking_rows),
+        "watchlist_view_rows_count": len(watchlist_view_rows),
+        "etf_view_rows_count": len(etf_view_rows),
+    }
+    results = {
+        **status_results,
+        "diagnostics": diagnostics,
+    }
+    results["overall_status"] = classify_overall_status(status_results.values())
     return results
 
 

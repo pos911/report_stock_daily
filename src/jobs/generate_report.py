@@ -25,7 +25,6 @@ from src.utils.formatters import (
     format_pct,
     format_price,
     format_sections_list,
-    join_sentences,
     safe_change_rate,
     safe_float,
     unique_warnings,
@@ -49,6 +48,8 @@ def _parse_args():
     parser.add_argument("--date", dest="report_date", help="Report date in YYYYMMDD or YYYY-MM-DD (KST basis).")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-send", action="store_true")
+    parser.add_argument("--notify-on-skip", dest="notify_on_skip", action="store_true", default=True)
+    parser.add_argument("--no-notify-on-skip", dest="notify_on_skip", action="store_false")
     args = parser.parse_args()
     report_type = (args.report_type or "regular").strip().lower()
     if report_type not in VALID_REPORT_TYPES:
@@ -387,16 +388,56 @@ def _translate_blocked(values: list[str]) -> list[str]:
     return [mapping.get(value, value) for value in values]
 
 
-def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | None = None, send_enabled: bool = True):
+def _build_skip_report_text(report_type: str, report_date: str, calendar_status: dict) -> str:
+    title = {
+        "morning": "Morning Brief",
+        "regular": "Regular Brief",
+        "closing": "Closing Brief",
+    }[report_type]
+    lines = [
+        f"[{title} | {report_date}]",
+        "",
+        f"- 한국장: 휴장",
+        f"- 미국장: 휴장",
+        f"- 사유: {calendar_status.get('xkrx_reason') or 'closed'} / {calendar_status.get('xnys_reason') or 'closed'}",
+        "- 오늘은 양 시장 휴장으로 정규 리포트를 생략합니다.",
+        f"- 다음 한국 거래일: {calendar_status.get('xkrx_next_trading_day') or NA_TEXT}",
+        f"- 다음 미국 거래일: {calendar_status.get('xnys_next_trading_day') or NA_TEXT}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def run_report(
+    report_type: str,
+    now_kst: datetime.datetime,
+    report_date: str | None = None,
+    send_enabled: bool = True,
+    notify_on_skip: bool = True,
+):
     base_reader = SupabaseReader()
     reader = SupabaseStockDataReader(base_reader=base_reader)
     normalized_report_date = _normalize_report_date(report_date, now_kst)
     calendar_status = base_reader.fetch_market_calendar_status(normalized_report_date)
     logger.info("calendar_status=%s", calendar_status)
+    telegram_token = getattr(base_reader, "telegram_bot_token", None)
+    telegram_chat_id = getattr(base_reader, "telegram_chat_id", None)
+    logger.info("telegram_config_present=%s", str(bool(telegram_token and telegram_chat_id)).lower())
 
     if _should_skip_all_markets(calendar_status):
-        skip_text = _build_market_closed_skip_text(report_type, now_kst, calendar_status)
-        logger.info("\n%s", skip_text)
+        skip_text = _build_skip_report_text(report_type, normalized_report_date, calendar_status)
+        _save_report(report_type, skip_text, now_kst)
+        logger.info("telegram_skip_reason=all_markets_closed notify_on_skip=%s", str(notify_on_skip).lower())
+        if send_enabled and notify_on_skip:
+            try:
+                sender = TelegramSender()
+                sender.send_report(skip_text)
+            except Exception as exc:
+                logger.warning("telegram_send_success=false telegram_skip_reason=skip_message_send_failed error=%s", exc)
+        else:
+            logger.info(
+                "telegram_send_attempted=false telegram_skip_reason=%s",
+                "dry_run_or_no_send" if not send_enabled else "notify_on_skip_false",
+            )
         return
 
     bundle = reader.get_report_contract_bundle(report_type=report_type, target_date=normalized_report_date)
@@ -414,22 +455,28 @@ def run_report(report_type: str, now_kst: datetime.datetime, report_date: str | 
     _save_report(report_type, report_content, now_kst)
 
     if not send_enabled:
-        logger.info("Dry-run or no-send mode enabled. Telegram sending skipped.")
+        logger.info("telegram_send_attempted=false telegram_skip_reason=dry_run_or_no_send")
         return
 
     try:
         sender = TelegramSender()
         sender.send_report(report_content)
     except Exception as exc:
-        logger.warning("Telegram send failed (non-fatal): %s", exc)
+        logger.warning("telegram_send_success=false telegram_skip_reason=send_failed error=%s", exc)
 
 
 def main():
     args = _parse_args()
     now_kst = _get_now_kst()
     send_enabled = not (args.dry_run or args.no_send)
-    logger.info("=== Daily Report Pipeline start [type=%s dry_run=%s] ===", args.report_type, not send_enabled)
-    run_report(args.report_type, now_kst, report_date=args.report_date, send_enabled=send_enabled)
+    logger.info("=== Daily Report Pipeline start [type=%s dry_run=%s notify_on_skip=%s] ===", args.report_type, not send_enabled, args.notify_on_skip)
+    run_report(
+        args.report_type,
+        now_kst,
+        report_date=args.report_date,
+        send_enabled=send_enabled,
+        notify_on_skip=args.notify_on_skip,
+    )
 
 
 if __name__ == "__main__":

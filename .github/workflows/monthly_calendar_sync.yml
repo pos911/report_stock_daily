@@ -1,4 +1,4 @@
-name: Monthly Calendar Sync Policy
+name: Monthly Calendar Sync Audit
 
 on:
   schedule:

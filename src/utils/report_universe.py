@@ -427,10 +427,17 @@ def evaluate_raw_retention(current_date: str, raw_stats: dict[str, str | None]) 
 
 
 def classify_overall_status(results: Iterable[dict]) -> str:
-    statuses = [str(result.get("status")) for result in results]
-    if "FAIL" in statuses:
+    statuses: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        status = str(result.get("status") or "").upper().strip()
+        if not status:
+            continue
+        statuses.append(status)
+    if any(status.startswith("FAIL") for status in statuses):
         return "FAIL"
-    if "WARN" in statuses:
+    if any(status.startswith("WARN") or status.startswith("PARTIAL") for status in statuses):
         return "WARN"
     return "PASS"
 

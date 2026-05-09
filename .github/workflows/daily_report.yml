@@ -2,30 +2,33 @@ name: Daily Quant Report Automation
 
 on:
   schedule:
-    # 07:00 KST morning report
     - cron: "0 22 * * 0-4"
-    # 10:30, 12:30, 14:30 KST regular intraday reports
     - cron: "30 1,3,5 * * 1-5"
-    # 15:40 KST closing report
     - cron: "40 6 * * 1-5"
   workflow_dispatch:
     inputs:
       report_type:
-        description: "Report type (morning / closing / regular)"
+        description: "morning / regular / closing / auto"
         required: false
-        default: "regular"
+        default: "auto"
+      report_date:
+        description: "YYYY-MM-DD optional"
+        required: false
+        default: ""
+      notify_on_skip:
+        description: "Send Telegram message even when both markets are closed"
+        required: false
+        default: "true"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  morning-report:
-    name: Morning Report (07:00 KST)
+  report:
+    name: Run report
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && contains(github.event.schedule, '0 22')
     env:
       TZ: Asia/Seoul
-
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +43,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Inject API Keys & Run Morning Report
+      - name: Prepare runtime secrets
         env:
           API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
         run: |
@@ -49,173 +52,89 @@ jobs:
           raw = os.getenv("API_KEYS_JSON", "")
           if not raw:
               raise RuntimeError("API_KEYS_JSON secret is empty.")
-          config = json.loads(raw)
-          def pick(*vals):
-              return next((v for v in vals if v), "")
+          payload = json.loads(raw)
+
+          def pick(*values):
+              return next((value for value in values if value), "")
+
           env_map = {
-              "SUPABASE_URL":        pick(config.get("supabase",{}).get("url"), config.get("supabase_url")),
-              "SUPABASE_KEY":        pick(config.get("supabase",{}).get("service_role_key"), config.get("supabase_key")),
-              "GEMINI_API_KEY":      pick(config.get("gemini",{}).get("api_key"), config.get("gemini_api_key"), config.get("GEMINI_API_KEY")),
-              "TELEGRAM_BOT_TOKEN":  pick(config.get("telegram",{}).get("bot_token"), config.get("telegram_bot_token"), config.get("TELEGRAM_BOT_TOKEN")),
-              "TELEGRAM_CHAT_ID":    pick(config.get("telegram",{}).get("chat_id"), config.get("telegram_chat_id"), config.get("TELEGRAM_CHAT_ID")),
-              "GOOGLE_DOCS_NEWS_URL":pick(config.get("google_docs",{}).get("news_url"), config.get("google_docs_news_url"), config.get("GOOGLE_DOCS_NEWS_URL")),
+              "SUPABASE_URL": pick(payload.get("supabase", {}).get("url"), payload.get("supabase_url")),
+              "SUPABASE_KEY": pick(payload.get("supabase", {}).get("service_role_key"), payload.get("supabase_key")),
+              "GEMINI_API_KEY": pick(payload.get("gemini", {}).get("api_key"), payload.get("gemini_api_key"), payload.get("GEMINI_API_KEY")),
+              "TELEGRAM_BOT_TOKEN": pick(payload.get("telegram", {}).get("bot_token"), payload.get("telegram_bot_token"), payload.get("TELEGRAM_BOT_TOKEN")),
+              "TELEGRAM_CHAT_ID": pick(payload.get("telegram", {}).get("chat_id"), payload.get("telegram_chat_id"), payload.get("TELEGRAM_CHAT_ID")),
+              "GOOGLE_DOCS_NEWS_URL": pick(payload.get("google_docs", {}).get("news_url"), payload.get("google_docs_news_url"), payload.get("GOOGLE_DOCS_NEWS_URL")),
+              "KIS_APP_KEY": pick(payload.get("kis", {}).get("app_key"), payload.get("KIS_APP_KEY")),
+              "KIS_APP_SECRET": pick(payload.get("kis", {}).get("app_secret"), payload.get("KIS_APP_SECRET")),
+              "KIS_ACCESS_TOKEN": pick(payload.get("kis", {}).get("access_token"), payload.get("KIS_ACCESS_TOKEN")),
           }
-          required = ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY")
-          missing = [k for k in required if not env_map.get(k)]
+
+          for key in (
+              "SUPABASE_KEY",
+              "GEMINI_API_KEY",
+              "TELEGRAM_BOT_TOKEN",
+              "TELEGRAM_CHAT_ID",
+              "KIS_APP_KEY",
+              "KIS_APP_SECRET",
+              "KIS_ACCESS_TOKEN",
+          ):
+              value = env_map.get(key)
+              if value:
+                  print(f"::add-mask::{value}")
+
+          required = ("SUPABASE_URL", "SUPABASE_KEY")
+          missing = [key for key in required if not env_map.get(key)]
           if missing:
               raise RuntimeError(f"Missing required keys: {', '.join(missing)}")
-          with open(".runtime_env", "w") as f:
-              for k, v in env_map.items():
-                  if v:
-                      if k in {"SUPABASE_KEY","GEMINI_API_KEY","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID"}:
-                          print(f"::add-mask::{v}")
-                      escaped = str(v).replace("\\","\\\\").replace('"','\\"')
-                      f.write(f'export {k}="{escaped}"\n')
+
+          with open(".runtime_env", "w", encoding="utf-8") as handle:
+              for key, value in env_map.items():
+                  if not value:
+                      continue
+                  escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+                  handle.write(f'export {key}="{escaped}"\n')
           PY
 
+      - name: Determine report type
+        id: resolve
+        shell: bash
+        run: |
+          EVENT_NAME="${{ github.event_name }}"
+          SCHEDULE="${{ github.event.schedule }}"
+          INPUT_TYPE="${{ github.event.inputs.report_type || 'auto' }}"
+          INPUT_DATE="${{ github.event.inputs.report_date || '' }}"
+          INPUT_NOTIFY="${{ github.event.inputs.notify_on_skip || 'true' }}"
+
+          REPORT_TYPE="regular"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$INPUT_TYPE" != "" && "$INPUT_TYPE" != "auto" ]]; then
+            REPORT_TYPE="$INPUT_TYPE"
+          elif [[ "$SCHEDULE" == "0 22 * * 0-4" ]]; then
+            REPORT_TYPE="morning"
+          elif [[ "$SCHEDULE" == "40 6 * * 1-5" ]]; then
+            REPORT_TYPE="closing"
+          else
+            REPORT_TYPE="regular"
+          fi
+
+          echo "report_type=$REPORT_TYPE" >> "$GITHUB_OUTPUT"
+          echo "report_date=$INPUT_DATE" >> "$GITHUB_OUTPUT"
+          echo "notify_on_skip=$INPUT_NOTIFY" >> "$GITHUB_OUTPUT"
+
+      - name: Run report
+        shell: bash
+        run: |
           source .runtime_env
-          python src/jobs/generate_report.py --type morning
-          rm -f .runtime_env
+          CMD=(python src/jobs/generate_report.py --type "${{ steps.resolve.outputs.report_type }}")
+          if [[ -n "${{ steps.resolve.outputs.report_date }}" ]]; then
+            CMD+=(--date "${{ steps.resolve.outputs.report_date }}")
+          fi
+          if [[ "${{ steps.resolve.outputs.notify_on_skip }}" == "true" ]]; then
+            CMD+=(--notify-on-skip)
+          else
+            CMD+=(--no-notify-on-skip)
+          fi
+          "${CMD[@]}"
 
-      - name: Commit and Push Report
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add reports/*.md
-          git commit -m "Auto-generated morning quant report [skip ci]" || echo "No changes to commit"
-          git push
-
-  closing-report:
-    name: Closing Report (15:40 KST)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && contains(github.event.schedule, '40 6')
-    env:
-      TZ: Asia/Seoul
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Inject API Keys & Run Closing Report
-        env:
-          API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
-        run: |
-          python - <<'PY'
-          import json, os
-          raw = os.getenv("API_KEYS_JSON", "")
-          if not raw:
-              raise RuntimeError("API_KEYS_JSON secret is empty.")
-          config = json.loads(raw)
-          def pick(*vals):
-              return next((v for v in vals if v), "")
-          env_map = {
-              "SUPABASE_URL":        pick(config.get("supabase",{}).get("url"), config.get("supabase_url")),
-              "SUPABASE_KEY":        pick(config.get("supabase",{}).get("service_role_key"), config.get("supabase_key")),
-              "GEMINI_API_KEY":      pick(config.get("gemini",{}).get("api_key"), config.get("gemini_api_key"), config.get("GEMINI_API_KEY")),
-              "TELEGRAM_BOT_TOKEN":  pick(config.get("telegram",{}).get("bot_token"), config.get("telegram_bot_token"), config.get("TELEGRAM_BOT_TOKEN")),
-              "TELEGRAM_CHAT_ID":    pick(config.get("telegram",{}).get("chat_id"), config.get("telegram_chat_id"), config.get("TELEGRAM_CHAT_ID")),
-              "GOOGLE_DOCS_NEWS_URL":pick(config.get("google_docs",{}).get("news_url"), config.get("google_docs_news_url"), config.get("GOOGLE_DOCS_NEWS_URL")),
-          }
-          required = ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY")
-          missing = [k for k in required if not env_map.get(k)]
-          if missing:
-              raise RuntimeError(f"Missing required keys: {', '.join(missing)}")
-          with open(".runtime_env", "w") as f:
-              for k, v in env_map.items():
-                  if v:
-                      if k in {"SUPABASE_KEY","GEMINI_API_KEY","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID"}:
-                          print(f"::add-mask::{v}")
-                      escaped = str(v).replace("\\","\\\\").replace('"','\\"')
-                      f.write(f'export {k}="{escaped}"\n')
-          PY
-
-          source .runtime_env
-          python src/jobs/generate_report.py --type closing
-          rm -f .runtime_env
-
-      - name: Commit and Push Report
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add reports/*.md
-          git commit -m "Auto-generated closing quant report [skip ci]" || echo "No changes to commit"
-          git push
-
-  regular-report:
-    name: Regular Report (10:30 / 12:30 / 14:30 KST)
-    runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'schedule' && contains(github.event.schedule, '30 1,3,5')) ||
-      github.event_name == 'workflow_dispatch'
-    env:
-      TZ: Asia/Seoul
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Inject API Keys & Run Regular Report
-        env:
-          API_KEYS_JSON: ${{ secrets.API_KEYS_JSON }}
-          REPORT_TYPE: ${{ github.event.inputs.report_type || 'regular' }}
-        run: |
-          python - <<'PY'
-          import json, os
-          raw = os.getenv("API_KEYS_JSON", "")
-          if not raw:
-              raise RuntimeError("API_KEYS_JSON secret is empty.")
-          config = json.loads(raw)
-          def pick(*vals):
-              return next((v for v in vals if v), "")
-          env_map = {
-              "SUPABASE_URL":        pick(config.get("supabase",{}).get("url"), config.get("supabase_url")),
-              "SUPABASE_KEY":        pick(config.get("supabase",{}).get("service_role_key"), config.get("supabase_key")),
-              "GEMINI_API_KEY":      pick(config.get("gemini",{}).get("api_key"), config.get("gemini_api_key"), config.get("GEMINI_API_KEY")),
-              "TELEGRAM_BOT_TOKEN":  pick(config.get("telegram",{}).get("bot_token"), config.get("telegram_bot_token"), config.get("TELEGRAM_BOT_TOKEN")),
-              "TELEGRAM_CHAT_ID":    pick(config.get("telegram",{}).get("chat_id"), config.get("telegram_chat_id"), config.get("TELEGRAM_CHAT_ID")),
-              "GOOGLE_DOCS_NEWS_URL":pick(config.get("google_docs",{}).get("news_url"), config.get("google_docs_news_url"), config.get("GOOGLE_DOCS_NEWS_URL")),
-          }
-          required = ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY")
-          missing = [k for k in required if not env_map.get(k)]
-          if missing:
-              raise RuntimeError(f"Missing required keys: {', '.join(missing)}")
-          with open(".runtime_env", "w") as f:
-              for k, v in env_map.items():
-                  if v:
-                      if k in {"SUPABASE_KEY","GEMINI_API_KEY","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID"}:
-                          print(f"::add-mask::{v}")
-                      escaped = str(v).replace("\\","\\\\").replace('"','\\"')
-                      f.write(f'export {k}="{escaped}"\n')
-          PY
-
-          source .runtime_env
-          python src/jobs/generate_report.py --type ${REPORT_TYPE}
-          rm -f .runtime_env
-
-      - name: Commit and Push Report
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add reports/*.md
-          git commit -m "Auto-generated ${{ env.REPORT_TYPE }} quant report [skip ci]" || echo "No changes to commit"
-          git push
+      - name: Cleanup runtime secrets
+        if: always()
+        run: rm -f .runtime_env
