@@ -58,7 +58,7 @@ SECTOR_NAME_MAP = {
     "통신": "통신",
     "게임": "게임",
     "전력/유틸리티": "전력/유틸리티",
-    "항공우주": "항공우주",
+    "철강/소재": "철강/소재",
 }
 
 STOCK_NAME_MAP = {
@@ -72,6 +72,10 @@ STOCK_NAME_MAP = {
     "012450": "한화에어로스페이스",
     "017670": "SK텔레콤",
     "015760": "한국전력",
+    "006800": "미래에셋증권",
+    "005490": "POSCO홀딩스",
+    "204620": "글로벌텍스프리",
+    "023160": "태광",
 }
 
 
@@ -91,20 +95,18 @@ def build_data_status_section(
         f"- 사용 가능: {format_sections_list(_translate_allowed_sections(allowed))}",
         f"- 생략: {format_sections_list(_translate_blocked_sections(blocked))}",
     ]
-
     note_parts: list[str] = []
     limitation = readiness.get("data_limitation_note")
     if limitation:
         note_parts.append(limitation)
     if freshness.get("carry_forward_fields"):
-        note_parts.append("미국장 휴장일 지표는 직전 거래일 기준으로 해석합니다.")
+        note_parts.append("미국장 지표는 직전 거래일 기준으로 해석합니다.")
     if freshness.get("stale_warnings"):
         note_parts.append(_translate_stale_warning(freshness.get("stale_warnings")))
     if contract_failed_views:
         note_parts.append("일부 contract view 미조회로 대체 기준 데이터를 함께 사용했습니다.")
     if note_parts:
         lines.append(f"- 참고: {join_sentences(note_parts, limit=2)}")
-
     anomaly_note = unique_warnings(anomaly_warnings or [], limit=1)
     if anomaly_note:
         lines.append(f"- 주의: {anomaly_note[0]}")
@@ -121,22 +123,74 @@ def build_one_line_judgment_section(regime: dict, top_sectors: list[dict], fresh
     if freshness.get("xkrx_is_open") is False:
         summary = join_sentences(
             [
-                f"한국장은 휴장이며 다음 거래일 준비 관점에서는 {sector_text or '주요 테마'} 점검이 우선입니다.",
+                f"한국장 휴장일인 만큼 다음 거래일 준비 관점에서는 {sector_text or '주요 테마'} 점검이 우선입니다",
                 global_driver,
-                risk_text or "직접 대응보다 다음 거래일 확인 조건을 미리 정리하는 편이 좋습니다.",
+                risk_text or "직접 대응보다 다음 거래일 확인 조건을 미리 정리하는 편이 좋습니다",
             ],
             limit=3,
         )
     else:
         summary = join_sentences(
             [
-                f"오늘 한국장은 {_market_tone_text(regime)} 쪽에 가깝습니다.",
-                f"{global_driver} {sector_text or '주요 테마'} 중심의 선별 대응이 유리합니다.",
+                f"오늘 한국장은 {_market_tone_text(regime)} 쪽에 가깝습니다",
+                f"{global_driver} {sector_text or '주요 테마'} 중심의 선별 대응이 유리합니다",
                 risk_text,
             ],
             limit=3,
         )
     return [summary]
+
+
+def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dict, readiness: dict, rankings: list[dict], watchlist_scores: list[dict]) -> list[str]:
+    lead_sector = _display_sector_name((top_sectors[0] if top_sectors else {}).get("sector_group"))
+    second_sector = _display_sector_name((top_sectors[1] if len(top_sectors) > 1 else {}).get("sector_group"))
+    watched = ", ".join(_display_stock_name(row.get("symbol"), row.get("name")) for row in watchlist_scores[:2]) or "관심종목"
+
+    attack = []
+    attack.append(
+        "SOX와 Nasdaq 강세가 이어지고 USD/KRW가 안정되면 "
+        f"{lead_sector or '주도 테마'} 중심의 시초가 강세가 이어질 수 있습니다."
+    )
+    if lead_sector or second_sector:
+        attack.append(
+            f"단, {sector_text(lead_sector, second_sector)}과 연결된 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
+        )
+
+    defensive = []
+    defensive.append("환율, 유가, 금리 또는 단기 과열 신호가 겹치면 추격보다 눌림 확인이 우선입니다.")
+    if readiness.get("display_mode") != "FULL_MARKET":
+        defensive.append("전체시장 커버리지가 제한돼 KIS 거래량 상위와 관심종목 반응만 선별적으로 해석합니다.")
+    if any(row.get("data_status") == "STALE_BUT_USABLE" for row in top_sectors):
+        defensive.append("기준일이 하루 이상 지난 ETF는 보조 신호로만 해석합니다.")
+
+    opening_checks = []
+    if freshness.get("xkrx_is_open"):
+        opening_checks.extend(
+            [
+                "09:30 외국인 선물 방향 확인",
+                "KIS 거래량 상위 유지 여부 확인",
+                f"{watched} 거래대금 유지 여부 확인",
+                "주도 ETF와 대표 종목 동행 여부 확인",
+            ]
+        )
+    else:
+        opening_checks.extend(
+            [
+                "다음 거래일 장초반 외국인 선물 방향 확인",
+                "KIS 거래량 상위 유지 여부 확인",
+                f"{watched} 거래대금 갱신 여부 확인",
+                "주도 ETF와 대표 종목 동행 여부 확인",
+            ]
+        )
+
+    return [
+        "공격적 관점:",
+        f"- {join_sentences(attack, limit=2)}",
+        "보수적 관점:",
+        f"- {join_sentences(defensive, limit=2)}",
+        "장초반 확인 조건:",
+        *[f"- {item}" for item in opening_checks[:4]],
+    ]
 
 
 def build_global_market_section(macro: dict) -> list[str]:
@@ -181,7 +235,7 @@ def build_priority_themes_section(top_sectors: list[dict], freshness: dict, read
         if investor_reason and investor_reason != "수급 확인이 제한적입니다.":
             lines.append(f"- 수급 또는 거래대금 근거: {clean_sentence(investor_reason)}")
         else:
-            lines.append("- 수급 또는 거래대금 근거: 관심종목·랭킹 후보 기준으로 거래대금과 수급 반응을 함께 확인합니다.")
+            lines.append("- 수급 또는 거래대금 근거: 관심종목·랭킹 후보 기준으로 거래대금과 수급 반응을 추가 확인합니다.")
         lines.append(f"- 리스크: {join_sentences([row.get('risk')], limit=1) or '과열 여부를 추가 확인합니다.'}")
         lines.append(f"- {point_label}: {_checkpoint_text(row.get('intraday_checkpoints') or [], freshness)}")
         lines.append(f"- 데이터 상태: {_theme_data_status_text(row.get('data_status'))}")
@@ -284,9 +338,9 @@ def collect_scale_warnings(macro: dict, watchlist_rows: list[dict]) -> list[str]
 def _theme_evidence_text(row: dict, readiness: dict) -> str:
     status = row.get("data_status")
     if status in {"STALE", "NO_DATA"}:
-        return "대표 ETF 데이터가 오래돼 ETF 기반 정량 판단은 제한하고 관심종목·랭킹 후보 반응 위주로 봅니다."
+        return "대표 ETF 기준일이 오래돼 ETF 기반 정량 판단은 제한하고 관심종목 반응을 위주로 봅니다."
     if status == "STALE_BUT_USABLE":
-        return "대표 ETF 기준일이 하루 이상 지나 보조 신호로만 보고 관심종목·랭킹 후보 반응을 함께 확인합니다."
+        return "대표 ETF 기준일이 하루 이상 지나 보조 신호로만 보고 관심종목 반응을 함께 확인합니다."
 
     text = clean_sentence(row.get("etf_reason") or "")
     if row.get("etf_symbol") == "462330" and "레버리지" not in text:
@@ -346,7 +400,7 @@ def _global_driver_summary(regime: dict) -> str:
     if regime.get("positive_drivers"):
         return "미국 지표는 위험선호 쪽에 기울어 있습니다."
     if regime.get("negative_drivers"):
-        return "미국 지표는 보수적 해석이 필요합니다."
+        return "미국 지표는 보수적으로 해석할 필요가 있습니다."
     return "글로벌 지표는 방향성이 뚜렷하지 않습니다."
 
 
@@ -354,9 +408,9 @@ def _risk_summary(top_sectors: list[dict], regime: dict) -> str:
     for row in top_sectors:
         warnings = row.get("warnings") or []
         if any("OVERHEATED_20D" in warning for warning in warnings):
-            return "단기 과열 신호가 있어 추격보다는 거래대금 유지 여부를 먼저 확인해야 합니다."
+            return "단기 과열 신호가 있어 추격보다 거래대금 유지 여부를 먼저 확인해야 합니다."
         if row.get("data_status") == "STALE":
-            return "대표 ETF 기준일이 오래돼 테마 해석 비중은 낮춰야 합니다."
+            return "대표 ETF 기준일이 오래돼 테마 해석 비중을 낮춰야 합니다."
     for warning in regime.get("warnings") or []:
         translated = _translate_warning(warning)
         if translated:
@@ -387,7 +441,7 @@ def _interpret_vix(level, change_rate) -> str:
     level_value = safe_float(level)
     rate = safe_change_rate(change_rate)
     if level_value is not None and level_value >= 20:
-        return "변동성 부담이 높아졌습니다."
+        return "변동성 부담이 높은 편입니다."
     if rate is not None and rate <= -0.05:
         return "리스크 선호 회복 신호입니다."
     return "변동성은 중립권입니다."
@@ -415,15 +469,27 @@ def _interpret_dxy(change_rate) -> str:
     return "달러 방향은 중립입니다."
 
 
+def _topic_particle(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return "는"
+    code = ord(value[-1])
+    if 0xAC00 <= code <= 0xD7A3:
+        jong = (code - 0xAC00) % 28
+        return "은" if jong else "는"
+    return "는"
+
+
 def _interpret_rate(change_bp, meaning: str) -> str:
     numeric = safe_float(change_bp)
+    particle = _topic_particle(meaning)
     if numeric is None:
-        return f"{meaning}는 미확인입니다."
+        return f"{meaning}{particle} 미확인입니다."
     if numeric <= -5:
-        return f"{meaning}에는 우호적입니다."
+        return f"{meaning}{particle} 우호적입니다."
     if numeric >= 5:
-        return f"{meaning}에는 부담입니다."
-    return f"{meaning}는 중립입니다."
+        return f"{meaning}{particle} 부담입니다."
+    return f"{meaning}{particle} 중립입니다."
 
 
 def _interpret_spread(spread) -> str:
@@ -433,8 +499,8 @@ def _interpret_spread(spread) -> str:
     if numeric > 0.25:
         return "정상 곡선 구간으로 성장 기대와 기간 프리미엄을 함께 봅니다."
     if numeric >= -0.05:
-        return "경기와 정책 기대가 혼재된 구간입니다."
-    return "역전 구간이라 경기 둔화 우려를 금리·달러와 함께 확인해야 합니다."
+        return "경기와 정책 기대가 혼재한 구간입니다."
+    return "역전 구간이라 경기 둔화 우려를 금리와 달러와 함께 확인해야 합니다."
 
 
 def _interpret_oil(change_rate) -> str:
@@ -470,14 +536,14 @@ def _translate_warning(value) -> str:
         "OVERHEATED_20D": "최근 20일 상승폭이 커 과열 부담을 함께 봐야 합니다.",
         "Speculative ETF excluded": "레버리지 ETF 급등은 과열 참고 신호로만 봅니다.",
         "ETF evidence excluded because data is stale or missing": "대표 ETF 기준일이 오래돼 정량 해석 비중을 낮춥니다.",
-        "ETF stale but usable": "대표 ETF 기준일이 하루 이상 지나 보조 신호로만 봅니다.",
+        "ETF stale but usable": "대표 ETF는 기준일이 하루 이상 지나 보조 신호로만 봅니다.",
     }
     lowered = text.lower()
     for source, target in replacements.items():
         if source.lower() in lowered:
             return target
     if "missing_required_data" in lowered:
-        return "핵심 데이터 일부가 늦어 보수적 해석이 필요합니다."
+        return "필수 데이터 일부가 없어 보수적 해석이 필요합니다."
     if "market breadth unavailable" in lowered:
         return "시장 breadth 확인이 제한적입니다."
     if "foreign flow missing" in lowered or "institutional flow missing" in lowered:
@@ -495,7 +561,7 @@ def _summarize_etf_status(row: dict) -> str:
 
 def _checkpoint_text(items: Iterable[str], freshness: dict) -> str:
     if freshness.get("xkrx_is_open") is False:
-        return "휴장으로 실시간 대응 없음 / 다음 거래일 확인: 관심종목·랭킹 후보 흐름 점검"
+        return "휴장으로 실시간 대응 없음 / 다음 거래일 확인: 관심종목과 ETF 흐름 점검"
     cleaned = [str(item).strip() for item in items if str(item).strip()]
     if not cleaned:
         return "09:30 외국인 선물 방향과 거래대금 유지 여부 확인"
@@ -517,3 +583,9 @@ def _theme_data_status_text(status: str | None) -> str:
         "STALE": "참고 제한",
         "NO_DATA": "미확인",
     }.get(str(status or "").upper(), "미확인")
+
+
+def sector_text(first: str, second: str) -> str:
+    if first and second:
+        return f"{first}와 {second}"
+    return first or second or "주도 테마"

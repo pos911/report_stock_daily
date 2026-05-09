@@ -246,6 +246,11 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     ]
     section_no = add_section(lines, section_no, summary_title, summary_body)
 
+    if report_type == "regular":
+        section_no = add_section(lines, section_no, "오전 View 점검", _build_regular_view_check_section(bundle))
+    else:
+        section_no = add_section(lines, section_no, "오늘의 핵심 키워드", _build_closing_key_message_section(bundle))
+
     limitation_body = []
     if readiness.get("display_mode") != "FULL_MARKET":
         limitation_body.append(f"- {readiness.get('data_limitation_note')}")
@@ -284,7 +289,7 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
             if score_value is not None:
                 parts.append(f"score {safe_float(score_value):.1f}")
             signal_body.append(" | ".join(parts))
-        title_text = "관심종목·랭킹 후보 Signal" if report_type == "regular" else "관심종목·후보군 마감 점검"
+        title_text = "관심종목 장중 반응" if report_type == "regular" else "관심종목 마감 진단"
         section_no = add_section(lines, section_no, title_text, signal_body)
 
     if readiness.get("kr_trading_value_ranking_ready"):
@@ -303,8 +308,8 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
         ]
         section_no = add_section(lines, section_no, "전체시장 시총 Top", mc_body)
 
-    checkpoint_title = "오후 체크포인트" if report_type == "regular" else "다음 거래일 체크포인트"
-    checkpoint_body = _build_non_morning_checkpoints(report_type, readiness)
+    checkpoint_title = "오후 체크포인트" if report_type == "regular" else "내일의 전략"
+    checkpoint_body = _build_non_morning_checkpoints(report_type, readiness, macro, rankings, watchlist)
     section_no = add_section(lines, section_no, checkpoint_title, checkpoint_body)
 
     return "\n".join(lines).strip() + "\n"
@@ -322,21 +327,22 @@ def _build_session_summary(report_type: str, macro: dict, rankings: list[dict], 
     for row in watchlist[:5]:
         derived = _derive_watchlist_signal(row)
         label = row.get("signal_label") or derived["label"]
-        if label in {"강한 모멘텀 후보", "보유·관찰"}:
+        if label in {"강한 모멘텀 후보", "보유·관찰", "관찰"}:
             strong_watch.append(row.get("name") or row.get("symbol"))
     if volume_names and strong_watch:
-        return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)} 중심으로 형성됐고, 관심종목 후보군은 {'·'.join(strong_watch[:2])} 중심으로 마감 복기를 제공합니다."
+        return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)} 중심으로 형성됐고, 관심종목 후보군은 {'·'.join(strong_watch[:2])} 중심으로 상대 강도를 복기합니다."
     if volume_names:
         return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)} 중심으로만 마감 복기를 제공합니다."
     return "오늘은 KIS 거래량 상위와 관심종목 후보군 중심으로만 마감 복기를 제공합니다."
 
 
-def _build_non_morning_checkpoints(report_type: str, readiness: dict) -> list[str]:
+def _build_non_morning_checkpoints(report_type: str, readiness: dict, macro: dict, rankings: list[dict], watchlist: list[dict]) -> list[str]:
     if report_type == "closing":
+        top_volume = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:2]
         return [
-            "- 미국장 확인 항목과 환율 방향 사전 점검",
-            "- KIS ranking 후보 지속 여부 확인",
-            "- 관심종목 리스크와 다음 거래일 대응 조건 정리",
+            f"- 공격적 조건: {'·'.join(top_volume) if top_volume else 'KIS 거래량 상위'}가 다음 거래일에도 유지되고 관심종목 거래대금이 동반 확대되는지 확인",
+            "- 보수적 조건: 환율과 금리가 다시 상승하면 추격보다 눌림 확인을 우선",
+            "- 반드시 확인할 데이터: 미국장 반도체 흐름, USD/KRW, KIS 거래량 상위 지속 여부",
         ]
     checkpoints = [
         "- 환율과 외국인 선물 방향 확인",
@@ -346,6 +352,60 @@ def _build_non_morning_checkpoints(report_type: str, readiness: dict) -> list[st
     if readiness.get("display_mode") != "FULL_MARKET":
         checkpoints.append("- 전체시장 Top 대신 관심종목·랭킹 후보 반응에 집중")
     return checkpoints[:4]
+
+
+def _build_regular_view_check_section(bundle: dict) -> list[str]:
+    sector_etfs = bundle.get("sector_etfs") or []
+    watchlist = bundle.get("watchlist") or []
+    rankings = bundle.get("rankings") or []
+
+    theme_candidates = [row.get("sector_group") for row in sector_etfs if row.get("sector_group")]
+    theme_candidates = list(dict.fromkeys(theme_candidates))[:3]
+    volume_names = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:3]
+
+    maintain = watchlist[:2]
+    mixed_or_stale = [row for row in watchlist[:5] if row.get("source_mixed") or str(row.get("data_status") or "").upper() == "STALE_BUT_USABLE"]
+
+    lines = [
+        f"- 오전 주도 후보: {', '.join(theme_candidates) if theme_candidates else '현재 데이터로는 확인 제한'}",
+        "- 현재 확인 가능한 데이터: KIS 거래량 순위, 관심종목 price/signal",
+    ]
+    if volume_names:
+        lines.append(f"- 유지 여부: KIS 거래량 상위는 {'·'.join(volume_names)} 중심으로 확인됩니다.")
+    if maintain:
+        names = "·".join(row.get("name") or row.get("symbol") for row in maintain)
+        lines.append(f"- 관심종목 반응: {names}은(는) 상대 강도 확인 구간입니다.")
+    if mixed_or_stale:
+        names = "·".join((row.get("name") or row.get("symbol")) for row in mixed_or_stale[:2])
+        lines.append(f"- 확인 필요: {names}은(는) 원천 혼합 또는 기준일 차이로 보수적 해석이 필요합니다.")
+    return lines
+
+
+def _build_closing_key_message_section(bundle: dict) -> list[str]:
+    macro = bundle.get("macro") or {}
+    rankings = bundle.get("rankings") or []
+    watchlist = bundle.get("watchlist") or []
+    keywords = []
+    if [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:1]:
+        keywords.append("KIS 거래량 집중")
+    usdkrw = safe_float(macro.get("usdkrw"))
+    if usdkrw is not None and usdkrw >= 1450:
+        keywords.append("환율 1,450원대")
+    if safe_change_rate(macro.get("brent_change_rate")) not in (None, 0) and safe_change_rate(macro.get("brent_change_rate")) > 0.01:
+        keywords.append("유가 부담")
+    strong = []
+    for row in watchlist[:5]:
+        derived = _derive_watchlist_signal(row)
+        if derived["label"] in {"강한 모멘텀 후보", "보유·관찰", "관찰"}:
+            strong.append(row.get("name") or row.get("symbol"))
+    lines = []
+    if keywords:
+        lines.append(f"- 오늘의 핵심 키워드: {' / '.join(keywords[:3])}")
+    if strong:
+        lines.append(f"- 관심종목 후보군은 {'·'.join(strong[:2])} 중심으로 상대 강도가 확인됐습니다.")
+    if not lines:
+        lines.append("- 현재 데이터로는 KIS 거래량 상위와 관심종목 후보군 중심 복기만 제공합니다.")
+    return lines
 
 
 def _derive_watchlist_signal(row: dict) -> dict:

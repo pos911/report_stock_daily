@@ -11,6 +11,7 @@ from src.reports.morning_sections import (
     build_one_line_judgment_section,
     build_priority_themes_section,
     build_risk_section,
+    build_scenario_section,
     build_watchlist_section,
     collect_scale_warnings,
 )
@@ -40,6 +41,7 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     section_no = 1
     section_no = add_section(lines, section_no, "데이터 상태", build_data_status_section(freshness, readiness, contract_failed_views, scale_warnings))
     section_no = add_section(lines, section_no, "오늘의 한 줄 판단", build_one_line_judgment_section(regime, top_sectors, freshness, readiness))
+    section_no = add_section(lines, section_no, "오늘의 시나리오", build_scenario_section(regime, top_sectors, freshness, readiness, rankings, watchlist_scores))
     section_no = add_section(lines, section_no, "야간 글로벌 시장", build_global_market_section(macro))
     section_no = add_section(lines, section_no, "한국장 예상 영향", build_korean_impact_section(top_sectors, freshness, readiness))
     section_no = add_section(lines, section_no, "오늘 우선 관찰 테마", build_priority_themes_section(top_sectors, freshness, readiness))

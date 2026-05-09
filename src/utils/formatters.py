@@ -172,10 +172,7 @@ def detect_market_value_anomaly(label: str, value: float | int | str | None) -> 
     numeric = safe_float(value)
     if numeric is None:
         return None
-    normalized = str(label or "").strip().upper()
-    if normalized == "KOSPI" and (numeric < 1000 or numeric > 5500):
-        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
-    if normalized == "KOSDAQ" and (numeric < 300 or numeric > 1600):
+    if numeric <= 0:
         return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
     return None
 

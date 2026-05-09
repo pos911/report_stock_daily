@@ -37,6 +37,7 @@ def build_watchlist_morning_scores(watchlist_snapshot: list[dict], regime: dict,
 
 
 def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
+    symbol = str(row.get("symbol") or "")
     source_mixed = bool(row.get("source_mixed"))
     stale_days = _to_int(row.get("stale_days"))
     data_status = str(row.get("data_status") or "").upper()
@@ -45,11 +46,11 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
         return {
             "score": 0.0,
             "signal_label": "판단 유보",
-            "quant_reasons": ["핵심 가격과 거래대금 확인이 제한적입니다."],
-            "positive_factors": ["데이터 갱신 이후 다시 확인하는 편이 좋습니다."],
-            "negative_factors": ["가격과 수급 기준이 충분하지 않습니다."],
+            "quant_reasons": ["종가와 거래대금 데이터가 충분하지 않습니다."],
+            "positive_factors": ["데이터가 갱신되면 다시 확인하는 편이 좋습니다."],
+            "negative_factors": ["가격과 수급 근거가 부족합니다."],
             "intraday_checkpoints": ["다음 거래일 기준 데이터 갱신 여부 확인"],
-            "core_priority": CORE_PRIORITY.get(str(row.get("symbol") or ""), 999),
+            "core_priority": CORE_PRIORITY.get(symbol, 999),
             "sector_impact_score": float((sector_impact or {}).get("score") or 0),
         }
 
@@ -65,7 +66,7 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
     score += _risk_penalty(row, negatives)
     score += _macro_fit(regime, sector_impact, positives, negatives)
 
-    if str(row.get("symbol") or "") in CORE_PRIORITY:
+    if symbol in CORE_PRIORITY:
         score += 4
 
     if source_mixed:
@@ -85,8 +86,8 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
         "quant_reasons": _dedupe(quant_reasons)[:3],
         "positive_factors": _dedupe(positives)[:2],
         "negative_factors": _dedupe(negatives)[:3],
-        "intraday_checkpoints": _build_checkpoints(row, sector_impact),
-        "core_priority": CORE_PRIORITY.get(str(row.get("symbol") or ""), 999),
+        "intraday_checkpoints": _build_checkpoints(row, sector_impact, regime, label),
+        "core_priority": CORE_PRIORITY.get(symbol, 999),
         "sector_impact_score": float((sector_impact or {}).get("score") or 0),
     }
 
@@ -169,7 +170,7 @@ def _quality_score(row: dict, quant_reasons: list[str], positives: list[str], ne
             positives.append("수익성이 받쳐주면 단기 수급 이후에도 추세 유지 가능성이 높습니다.")
             delta += 5
     if debt is not None and debt >= 150:
-        negatives.append("재무 부담이 높아 변동성 확대 구간에서 약해질 수 있습니다.")
+        negatives.append("부채 부담이 높아 변동성 확대 구간에서 약해질 수 있습니다.")
         delta -= 5
     return delta
 
@@ -208,12 +209,86 @@ def _macro_fit(regime: dict, sector_impact: dict | None, positives: list[str], n
     return delta
 
 
-def _build_checkpoints(row: dict, sector_impact: dict | None) -> list[str]:
-    sector_name = (sector_impact or {}).get("sector_group") or row.get("sector_group") or "관심 섹터"
-    return [
-        f"{sector_name} 거래대금과 수급 지속 여부",
-        "개장 후 가격 흐름이 강세를 유지하는지 확인",
-    ]
+def _build_checkpoints(row: dict, sector_impact: dict | None, regime: dict, signal_label: str) -> list[str]:
+    symbol = str(row.get("symbol") or "")
+    sector_name = str((sector_impact or {}).get("sector_group") or row.get("sector_group") or "관심 섹터")
+    source_mixed = bool(row.get("source_mixed"))
+    stale_days = _to_int(row.get("stale_days"))
+    short_ratio = safe_float(row.get("short_ratio"))
+    return_20d = safe_float(row.get("return_20d"))
+    return_5d = safe_float(row.get("return_5d"))
+    trading_ratio = safe_float(row.get("trading_value_ratio_20d"))
+    foreign_flow = safe_float(row.get("foreign_net_buy"))
+    institutional_flow = safe_float(row.get("institutional_net_buy"))
+    regime_label = str(regime.get("regime_label") or "")
+
+    if symbol == "005930":
+        items = [
+            "SOX·Nasdaq 강세가 삼성전자 거래대금으로 확산되는지 확인",
+            "외국인 순매도 완화 또는 순매수 전환 여부 확인" if foreign_flow is None or foreign_flow <= 0 else "외국인 순매수 흐름이 장초반에도 이어지는지 확인",
+            "KIS 거래량 rank 상위 유지 여부 확인",
+            "장초반 갭 상승이 나오면 고점 유지 여부 확인",
+        ]
+    elif symbol == "000660":
+        items = [
+            "SOX 강세와 주가 반응이 동행하는지 확인",
+            "최근 과열 부담을 거래대금이 흡수하는지 확인" if (return_5d and return_5d > 0.08) or (return_20d and return_20d > 0.20) else "반도체 강세가 거래대금 증가로 이어지는지 확인",
+            "반도체 ETF와 동행 여부 확인",
+            "외국인 수급 지속 여부 확인",
+        ]
+    elif symbol == "278470":
+        items = [
+            "단기 약세 이후 반등 거래대금이 유입되는지 확인",
+            "공매도 비중 부담이 완화되는지 확인" if short_ratio and short_ratio >= 3 else "소비재·화장품 섹터 동반 반응 여부 확인",
+            "화장품·소비재 섹터 수급 확산 여부 확인",
+        ]
+    elif symbol == "006800":
+        items = [
+            "증권업종 거래대금이 실제로 늘어나는지 확인",
+            "지수 상승 구간에서 베타 반응이 나오는지 확인",
+            "금리와 거래대금 환경이 증권주에 우호적인지 점검",
+            "기관·외국인 수급이 함께 붙는지 확인" if (foreign_flow or 0) > 0 or (institutional_flow or 0) > 0 else "기관·외국인 수급 반전 여부 확인",
+        ]
+    elif symbol == "005490":
+        items = [
+            "2차전지 ETF보다 개별 종목 수급 반응을 우선 확인",
+            "철강·소재·2차전지 밸류체인 동반 반응 여부 확인",
+            "원자재와 중국 관련 민감도 반응 확인",
+        ]
+    elif symbol == "204620":
+        items = [
+            "거래대금 급증이 실제로 동반되는지 확인",
+            "관광·소비·면세 관련 테마 반응 여부 확인",
+            "코스닥 중소형주 수급 확산 여부 확인",
+        ]
+    elif symbol == "023160":
+        items = [
+            "조선·플랜트·LNG 관련주 동반 반응 여부 확인",
+            "급락 이후 지지선이 유지되는지 확인",
+            "거래대금 동반 반등 여부 확인",
+            "리스크 관리 기준과 저점 이탈 여부 점검",
+        ]
+    else:
+        items = [f"{sector_name} 거래대금과 수급 확산 여부 확인"]
+        if signal_label == "강한 모멘텀 후보":
+            items.append("고점 추격보다 장초반 고점 유지 여부 확인")
+        elif return_5d is not None and return_5d < 0:
+            items.append("전일 저점 이탈 여부와 거래대금 동반 반등 확인")
+        else:
+            items.append("가격 흐름이 섹터 강도와 함께 유지되는지 확인")
+
+    if source_mixed:
+        items.append("가격 원천 혼합으로 수익률보다 당일 거래대금과 수급을 우선 확인")
+    if stale_days is not None and stale_days > 0:
+        items.append("기준일이 오래돼 당일 가격·거래대금 갱신 여부를 먼저 확인")
+    if return_20d is not None and return_20d >= 0.30:
+        items.append("고점 추격보다 장초반 고점 유지 여부 확인")
+    if trading_ratio is not None and trading_ratio < 0.8:
+        items.append("거래대금이 평균 아래면 추세 신뢰도 저하로 해석")
+    if regime_label == "Risk-off":
+        items.append("시장 보수화 구간이면 추격보다 수급 확인을 우선")
+
+    return _dedupe(items)[:4]
 
 
 def _label(score: float, source_mixed: bool = False, data_status: str | None = None) -> str:

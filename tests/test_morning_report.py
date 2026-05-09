@@ -96,8 +96,8 @@ class MorningReportTests(unittest.TestCase):
                 },
             ],
             "watchlist": [
-                {"symbol": "000660", "name": "SK하이닉스", "market": "KOSPI", "sector_group": "반도체", "close_price": 1686000, "return_5d": 0.1812, "return_20d": None, "return_60d": 0.40, "trading_value_ratio_20d": None, "foreign_net_buy": 12, "institutional_net_buy": 2, "roe": 18, "debt_ratio": 25, "short_ratio": 1, "data_status": "FRESH", "source_mixed": True, "stale_days": 0},
-                {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "sector_group": "반도체", "close_price": 268500, "return_5d": 0.0592, "return_20d": None, "return_60d": 0.24, "trading_value_ratio_20d": None, "foreign_net_buy": 10, "institutional_net_buy": 4, "roe": 15, "debt_ratio": 20, "short_ratio": 1, "data_status": "FRESH", "source_mixed": True, "stale_days": 0},
+                {"symbol": "000660", "name": "SK하이닉스", "market": "KOSPI", "sector_group": "반도체", "close_price": 1686000, "return_5d": 0.1812, "return_20d": None, "return_60d": 0.40, "trading_value_ratio_20d": None, "foreign_net_buy": 12, "institutional_net_buy": 2, "roe": 18, "debt_ratio": 25, "short_ratio": 1, "data_status": "FRESH", "source_mixed": False, "stale_days": 0},
+                {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "sector_group": "반도체", "close_price": 268500, "return_5d": 0.0592, "return_20d": None, "return_60d": 0.24, "trading_value_ratio_20d": None, "foreign_net_buy": 10, "institutional_net_buy": 4, "roe": 15, "debt_ratio": 20, "short_ratio": 1, "data_status": "FRESH", "source_mixed": False, "stale_days": 0},
                 {"symbol": "071050", "name": "한국금융지주", "market": "KOSPI", "sector_group": "금융/증권", "close_price": 100000, "return_5d": 0.0116, "return_20d": 0.2358, "return_60d": 0.3113, "trading_value_ratio_20d": 1.10, "foreign_net_buy": 3, "institutional_net_buy": 1, "roe": 14, "debt_ratio": 160, "short_ratio": 5.2, "data_status": "STALE_BUT_USABLE", "source_mixed": False, "stale_days": 1},
             ],
             "watchlist_diagnostics": {"raw_row_count": 21, "active_row_count": 7},
@@ -139,12 +139,11 @@ class MorningReportTests(unittest.TestCase):
         lines = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"].splitlines()
         judgment = lines[lines.index("2. 오늘의 한 줄 판단") + 1]
         self.assertLessEqual(judgment.count("."), 3)
-        self.assertNotIn("ETF 1일 모멘텀", judgment)
         self.assertIn("다음 거래일", judgment)
 
-    def test_scale_warning_is_included_once(self):
+    def test_scale_warning_is_not_for_high_level_only(self):
         text = generate_morning_brief(self._bundle(), "2026-05-05")["report_text"]
-        self.assertEqual(text.count("일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."), 1)
+        self.assertNotIn("일부 지수·종목 가격은 원천 스케일 확인이 필요합니다.", text)
 
     def test_snapshot_contains_readiness_fields(self):
         snapshot = generate_morning_brief(self._bundle(), "2026-05-05")["snapshot"]

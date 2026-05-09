@@ -55,7 +55,7 @@ class ReportReadinessSectionTests(unittest.TestCase):
         self.assertNotIn("\n4. 전체시장 거래대금 Top", text)
         self.assertNotIn("\n5. 전체시장 시총 Top", text)
         self.assertIn("KIS 거래량 순위 기준", text)
-        self.assertIn("관심종목·랭킹 후보 Signal", text)
+        self.assertIn("관심종목 장중 반응", text)
 
     def test_closing_hides_full_market_sections_when_not_ready(self):
         text = _build_simple_non_morning_report("closing", "2026-05-09", self.bundle)
