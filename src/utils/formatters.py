@@ -180,23 +180,32 @@ def detect_market_value_anomaly(label: str, value: float | int | str | None) -> 
     return None
 
 
-def detect_stock_price_anomaly(symbol: str | None, name: str | None, price: float | int | str | None) -> str | None:
+def detect_stock_price_anomaly(
+    symbol: str | None,
+    name: str | None,
+    price: float | int | str | None,
+    *,
+    previous_price: float | int | str | None = None,
+    data_quality_flag: str | None = None,
+    source_consistency_status: str | None = None,
+    source_mixed: bool | None = None,
+) -> str | None:
     numeric = safe_float(price)
     if numeric is None:
         return None
-    symbol_text = str(symbol or "").strip()
-    name_text = str(name or "").strip()
-    suspicious_thresholds = {
-        "005930": 200_000,
-        "000660": 1_000_000,
-        "012330": 500_000,
-        "071050": 300_000,
-    }
-    threshold = suspicious_thresholds.get(symbol_text)
-    if threshold is not None and numeric > threshold:
+    if str(data_quality_flag or "").upper() == "SOURCE_MIXED":
         return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
-    if name_text in {"삼성전자", "SK하이닉스", "현대모비스", "한국금융지주"} and numeric > 500_000:
+    if str(source_consistency_status or "").upper().startswith("SOURCE_MIXED"):
         return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    if bool(source_mixed):
+        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    if numeric <= 0:
+        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+    previous_numeric = safe_float(previous_price)
+    if previous_numeric not in (None, 0):
+        jump_ratio = abs((numeric / previous_numeric) - 1)
+        if jump_ratio >= 0.5:
+            return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
     return None
 
 

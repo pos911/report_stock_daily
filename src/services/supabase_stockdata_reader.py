@@ -203,8 +203,10 @@ class SupabaseStockDataReader:
         return row
 
     def get_morning_macro_snapshot(self, target_date: str | None = None) -> dict:
-        rows = self._fetch_view_rows("report_morning_macro_view", limit=2, order_column="base_date")
-        macro = dict(rows[0]) if rows else self._fetch_latest_row("normalized_global_macro_daily")
+        normalized_target_date = self._normalize_date(target_date)
+        rows = self._fetch_view_rows("report_morning_macro_view", limit=200, order_column="base_date")
+        eligible_rows = self._filter_rows_on_or_before(rows, "base_date", normalized_target_date)
+        macro = dict(eligible_rows[0]) if eligible_rows else self._fetch_latest_row_on_or_before("normalized_global_macro_daily", normalized_target_date)
         macro["contract_fallback_used"] = not bool(rows)
         warnings = []
         if macro["contract_fallback_used"]:
@@ -212,9 +214,9 @@ class SupabaseStockDataReader:
 
         if not macro:
             macro = {"base_date": None}
-        previous = self._fetch_previous_macro_row(macro.get("base_date"))
+        previous = self._select_previous_macro_row(eligible_rows, macro.get("base_date")) or self._fetch_previous_macro_row(macro.get("base_date"))
         self._inject_deltas(macro, previous, warnings)
-        breadth = self._fetch_latest_row("market_breadth_daily")
+        breadth = self._fetch_latest_row_on_or_before("market_breadth_daily", normalized_target_date)
         macro["breadth"] = breadth
         advances = self._to_float(breadth.get("advances"))
         declines = self._to_float(breadth.get("declines"))
@@ -227,17 +229,21 @@ class SupabaseStockDataReader:
         return macro
 
     def get_sector_etf_signals(self, target_date: str | None = None) -> list[dict]:
-        rows = self._fetch_view_rows("report_sector_etf_signal_view", limit=500, order_column="latest_price_date")
+        normalized_target_date = self._normalize_date(target_date)
+        rows = self._fetch_view_rows("report_sector_etf_signal_view", limit=2000, order_column="latest_price_date")
         if rows:
+            eligible_rows = self._filter_rows_on_or_before(rows, "latest_price_date", normalized_target_date)
+            latest_rows = self._pick_latest_by_symbol(eligible_rows, date_key="latest_price_date")
             normalized = [
                 self._normalize_sector_etf_row(row, contract_fallback_used=False, target_date=target_date)
-                for row in rows
+                for row in latest_rows.values()
             ]
             return normalized
         return [self._normalize_sector_etf_row(row, contract_fallback_used=True) for row in self._build_sector_etf_fallback(target_date)]
 
     def get_watchlist_snapshot(self, target_date: str | None = None) -> list[dict]:
-        view_rows = self._fetch_view_rows("report_watchlist_snapshot_view", limit=2000, order_column="base_date")
+        normalized_target_date = self._normalize_date(target_date)
+        view_rows = self._fetch_view_rows("report_watchlist_snapshot_view", limit=4000, order_column="base_date")
         contract_fallback_used = not bool(view_rows)
         active_universe = self.base_reader.fetch_static_stock_universe()
         active_symbols = {
@@ -248,6 +254,7 @@ class SupabaseStockDataReader:
         metadata_map = self._build_watchlist_metadata_map(active_universe)
         raw_row_count = len(view_rows)
         quality_map = self._fetch_watchlist_quality_map(sorted(active_symbols))
+        eligible_view_rows = self._filter_rows_on_or_before(view_rows, "base_date", normalized_target_date)
         normalized_rows = [
             self._normalize_watchlist_row(
                 row,
@@ -255,7 +262,7 @@ class SupabaseStockDataReader:
                 target_date=target_date,
                 quality_hint=quality_map.get(canonicalize_symbol(row.get("symbol"))),
             )
-            for row in view_rows
+            for row in eligible_view_rows
         ]
         if contract_fallback_used:
             fallback_rows = self._build_watchlist_fallback(target_date, symbols=sorted(active_symbols), metadata_map=metadata_map)
@@ -270,7 +277,8 @@ class SupabaseStockDataReader:
                 for row in fallback_rows
             ]
         filtered_rows = [row for row in normalized_rows if row.get("symbol") in active_symbols] if active_symbols else normalized_rows
-        by_symbol = {row["symbol"]: row for row in filtered_rows}
+        latest_rows = self._pick_latest_by_symbol(filtered_rows, date_key="base_date")
+        by_symbol = dict(latest_rows)
         for symbol in sorted(active_symbols):
             if symbol not in by_symbol:
                 meta = metadata_map.get(symbol, {})
@@ -314,13 +322,17 @@ class SupabaseStockDataReader:
         return ordered
 
     def get_market_rankings(self, target_date: str | None = None) -> list[dict]:
-        rows = self._fetch_view_rows("report_market_ranking_view", limit=1000, order_column="base_date")
+        normalized_target_date = self._normalize_date(target_date)
+        rows = self._fetch_view_rows("report_market_ranking_view", limit=3000, order_column="base_date")
         if rows:
+            eligible_rows = self._filter_rows_on_or_before(rows, "base_date", normalized_target_date)
+            latest_date = max((str(row.get("base_date") or "") for row in eligible_rows), default="")
+            latest_rows = [row for row in eligible_rows if str(row.get("base_date") or "") == latest_date] if latest_date else []
             return [
                 self._normalize_ranking_row(row, contract_fallback_used=False, target_date=target_date)
-                for row in rows
+                for row in latest_rows
             ]
-        latest_date = self._get_latest_base_date("normalized_market_rankings_daily")
+        latest_date = self._get_latest_base_date_on_or_before("normalized_market_rankings_daily", normalized_target_date)
         
         # [NEW] Apply source filtering rules for fallback
         # volume: source='KIS', trading_value/market_cap: source in ('KRX', 'VALID_PRICE_FALLBACK')
@@ -387,6 +399,22 @@ class SupabaseStockDataReader:
         except Exception:
             return {}
 
+    def _fetch_latest_row_on_or_before(self, table_name: str, target_date: str | None, date_column: str = "base_date") -> dict:
+        if not target_date:
+            return self._fetch_latest_row(table_name)
+        try:
+            response = (
+                self.client.table(table_name)
+                .select("*")
+                .lte(date_column, target_date)
+                .order(date_column, desc=True)
+                .limit(1)
+                .execute()
+            )
+            return (response.data or [{}])[0]
+        except Exception:
+            return {}
+
     def _fetch_previous_macro_row(self, current_base_date: str | None) -> dict:
         if not current_base_date:
             return {}
@@ -405,6 +433,10 @@ class SupabaseStockDataReader:
 
     def _get_latest_base_date(self, table_name: str) -> str | None:
         row = self._fetch_latest_row(table_name)
+        return row.get("base_date")
+
+    def _get_latest_base_date_on_or_before(self, table_name: str, target_date: str | None) -> str | None:
+        row = self._fetch_latest_row_on_or_before(table_name, target_date)
         return row.get("base_date")
 
     def _inject_deltas(self, current: dict, previous: dict, warnings: list[str] | None = None):
@@ -758,14 +790,33 @@ class SupabaseStockDataReader:
         except Exception:
             return []
 
-    def _pick_latest_by_symbol(self, rows: list[dict]) -> dict[str, dict]:
+    def _pick_latest_by_symbol(self, rows: list[dict], date_key: str = "base_date") -> dict[str, dict]:
         latest: dict[str, dict] = {}
         for row in rows:
             symbol = canonicalize_symbol(row.get("symbol"))
-            if not symbol or symbol in latest:
+            if not symbol:
                 continue
-            latest[symbol] = row
+            current = latest.get(symbol)
+            current_date = str(current.get(date_key) or "") if current else ""
+            row_date = str(row.get(date_key) or "")
+            if current is None or row_date > current_date:
+                latest[symbol] = row
         return latest
+
+    def _filter_rows_on_or_before(self, rows: list[dict], date_key: str, target_date: str | None) -> list[dict]:
+        if not target_date:
+            return list(rows)
+        eligible = [row for row in rows if str(row.get(date_key) or "") and str(row.get(date_key) or "") <= str(target_date)]
+        return sorted(eligible, key=lambda item: str(item.get(date_key) or ""), reverse=True)
+
+    def _select_previous_macro_row(self, rows: list[dict], current_base_date: str | None) -> dict:
+        if not current_base_date:
+            return {}
+        for row in rows:
+            base_date = str(row.get("base_date") or "")
+            if base_date and base_date < str(current_base_date):
+                return dict(row)
+        return {}
 
     def _build_price_metrics_map(self, rows: list[dict]) -> dict[str, dict]:
         grouped: dict[str, list[dict]] = {}

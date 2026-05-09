@@ -52,6 +52,10 @@ class WatchlistMorningTests(unittest.TestCase):
         )
         self.assertNotEqual(rows[0]["signal_label"], "강한 모멘텀 후보")
         self.assertIn("혼합", " ".join(rows[0]["negative_factors"]))
+        reasons = " ".join(rows[0]["quant_reasons"])
+        self.assertNotIn("5일 수익률", reasons)
+        self.assertNotIn("20일 수익률", reasons)
+        self.assertIn("가격 이력 원천 혼합", reasons)
 
     def test_return_20d_none_is_not_used_in_reasons(self):
         rows = build_watchlist_morning_scores(
@@ -72,6 +76,7 @@ class WatchlistMorningTests(unittest.TestCase):
         )
         reasons = " ".join(rows[0]["quant_reasons"])
         self.assertNotIn("20일 수익률", reasons)
+        self.assertNotIn("20일 평균 대비", reasons)
 
     def test_buy_hold_sell_not_used(self):
         rows = build_watchlist_morning_scores(

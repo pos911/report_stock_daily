@@ -267,7 +267,17 @@ def collect_scale_warnings(macro: dict, watchlist_rows: list[dict]) -> list[str]
         detect_market_value_anomaly("KOSDAQ", macro.get("kosdaq")),
     ]
     for row in watchlist_rows[:10]:
-        warnings.append(detect_stock_price_anomaly(row.get("symbol"), row.get("name"), row.get("close_price")))
+        warnings.append(
+            detect_stock_price_anomaly(
+                row.get("symbol"),
+                row.get("name"),
+                row.get("close_price"),
+                previous_price=row.get("prev_close_price"),
+                data_quality_flag=row.get("data_quality_flag"),
+                source_consistency_status=row.get("source_consistency_status"),
+                source_mixed=row.get("source_mixed"),
+            )
+        )
     return unique_warnings(warnings, limit=1)
 
 

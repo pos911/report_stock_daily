@@ -91,6 +91,60 @@ class SupabaseStockDataReaderTests(unittest.TestCase):
         self.assertEqual(self.reader._last_watchlist_diagnostics["raw_row_count"], 3)
         self.assertEqual(self.reader._last_watchlist_diagnostics["active_row_count"], 2)
 
+    def test_watchlist_snapshot_uses_latest_row_on_or_before_target_date(self):
+        class BaseReaderStub:
+            def fetch_static_stock_universe(self):
+                return [
+                    {"symbol": "005930", "name": "삼성전자", "market": "KOSPI"},
+                ]
+
+        self.reader.base_reader = BaseReaderStub()
+        self.reader._fetch_view_rows = lambda *args, **kwargs: [
+            {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "base_date": "2026-05-09", "close_price": 9, "data_status": "FRESH"},
+            {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "base_date": "2026-05-08", "close_price": 8, "data_status": "FRESH"},
+            {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "base_date": "2026-05-07", "close_price": 7, "data_status": "FRESH"},
+        ]
+        self.reader._fetch_watchlist_quality_map = lambda symbols: {}
+        rows = self.reader.get_watchlist_snapshot("2026-05-08")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["base_date"], "2026-05-08")
+        self.assertEqual(rows[0]["close_price"], 8)
+
+    def test_morning_macro_snapshot_excludes_future_rows(self):
+        self.reader._fetch_view_rows = lambda *args, **kwargs: [
+            {"base_date": "2026-05-09", "sp500": 9},
+            {"base_date": "2026-05-08", "sp500": 8},
+            {"base_date": "2026-05-07", "sp500": 7},
+        ]
+        self.reader._fetch_latest_row_on_or_before = lambda *args, **kwargs: {"base_date": "2026-05-08", "sp500": 8}
+        self.reader._fetch_previous_macro_row = lambda current_base_date: {}
+        self.reader._inject_deltas = lambda current, previous, warnings=None: None
+        self.reader.get_report_data_freshness = lambda target_date=None: {}
+        self.reader._select_previous_macro_row = SupabaseStockDataReader._select_previous_macro_row.__get__(self.reader, SupabaseStockDataReader)
+        macro = self.reader.get_morning_macro_snapshot("2026-05-08")
+        self.assertEqual(macro["base_date"], "2026-05-08")
+        self.assertEqual(macro["sp500"], 8)
+
+    def test_sector_etf_signals_exclude_future_rows(self):
+        self.reader._fetch_view_rows = lambda *args, **kwargs: [
+            {"symbol": "396500", "latest_price_date": "2026-05-09", "data_status": "FRESH"},
+            {"symbol": "396500", "latest_price_date": "2026-05-08", "data_status": "FRESH"},
+            {"symbol": "305720", "latest_price_date": "2026-05-08", "data_status": "FRESH"},
+        ]
+        self.reader._normalize_sector_etf_row = lambda row, contract_fallback_used=False, target_date=None: dict(row)
+        rows = self.reader.get_sector_etf_signals("2026-05-08")
+        self.assertEqual({row["symbol"]: row["latest_price_date"] for row in rows}, {"396500": "2026-05-08", "305720": "2026-05-08"})
+
+    def test_market_rankings_use_latest_base_date_on_or_before_target(self):
+        self.reader._fetch_view_rows = lambda *args, **kwargs: [
+            {"symbol": "A", "base_date": "2026-05-09", "rank_type": "volume"},
+            {"symbol": "B", "base_date": "2026-05-08", "rank_type": "volume"},
+            {"symbol": "C", "base_date": "2026-05-07", "rank_type": "volume"},
+        ]
+        self.reader._normalize_ranking_row = lambda row, contract_fallback_used=False, target_date=None: dict(row)
+        rows = self.reader.get_market_rankings("2026-05-08")
+        self.assertEqual([row["symbol"] for row in rows], ["B"])
+
     def test_resolve_source_mixed_from_quality_flag(self):
         self.assertTrue(
             self.reader._resolve_source_mixed(

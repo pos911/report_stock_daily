@@ -93,6 +93,10 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
 
 def _momentum_score(row: dict, quant_reasons: list[str], positives: list[str], negatives: list[str], source_mixed: bool) -> float:
     delta = 0.0
+    if source_mixed:
+        quant_reasons.append("가격 이력 원천 혼합으로 단기·중기 수익률은 참고에서 제외합니다.")
+        return 0.0
+
     for field, label, weight in (
         ("return_5d", "5일 수익률", 16),
         ("return_20d", "20일 수익률", 12),
@@ -102,15 +106,13 @@ def _momentum_score(row: dict, quant_reasons: list[str], positives: list[str], n
         if value is None:
             continue
         quant_reasons.append(f"{label} {value:+.2%}")
-        if source_mixed and field in {"return_5d", "return_20d"}:
-            continue
         if value > 0:
             delta += min(value * weight * 100, 12)
         elif value < 0:
             delta += max(value * weight * 100, -12)
 
     return_5d = safe_float(row.get("return_5d"))
-    if not source_mixed and return_5d is not None and return_5d > 0:
+    if return_5d is not None and return_5d > 0:
         positives.append("단기 주가 흐름이 상승 쪽으로 유지되고 있습니다.")
     elif return_5d is not None and return_5d < 0:
         negatives.append("단기 주가 흐름이 약해 반전 확인이 필요합니다.")
