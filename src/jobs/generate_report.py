@@ -83,26 +83,28 @@ def _should_include_us_sections(calendar_status: dict) -> bool:
     return calendar_status.get("report_market_mode") in {"FULL_REPORT", "US_ONLY", "CALENDAR_UNKNOWN"}
 
 
-def _build_market_closed_skip_text(report_type: str, now_kst: datetime.datetime, calendar_status: dict) -> str:
-    return "\n".join(
-        [
-            f"SKIPPED_REPORT_MARKET_CLOSED | type={report_type}",
-            f"- generated_at: {now_kst.strftime('%Y-%m-%d %H:%M KST')}",
-            f"- report_date: {calendar_status.get('report_date')}",
-            f"- XKRX: closed ({calendar_status.get('xkrx_reason')}) / prev {calendar_status.get('xkrx_previous_trading_day') or NA_TEXT}",
-            f"- XNYS: closed ({calendar_status.get('xnys_reason')}) / prev {calendar_status.get('xnys_previous_trading_day') or NA_TEXT}",
-            "- status: SKIPPED_REPORT_MARKET_CLOSED",
-        ]
-    )
-
-
-def _save_report(report_type: str, report_content: str, now_kst: datetime.datetime) -> Path:
-    reports_dir = project_root / "reports"
-    reports_dir.mkdir(exist_ok=True)
-    file_path = reports_dir / f"daily_quant_report_{report_type}_{now_kst.strftime('%Y%m%d_%H%M')}.md"
-    file_path.write_text(report_content, encoding="utf-8")
-    logger.info("Report saved: %s", file_path)
-    return file_path
+def _build_market_closed_skip_text(report_type: str, report_date, calendar_status: dict) -> str:
+    if isinstance(report_date, datetime.datetime):
+        normalized_report_date = report_date.date().isoformat()
+    elif isinstance(report_date, datetime.date):
+        normalized_report_date = report_date.isoformat()
+    else:
+        normalized_report_date = str(report_date)
+    title = {"morning": "Morning Brief", "regular": "Regular Brief", "closing": "Closing Brief"}[report_type]
+    lines = [
+        f"[{title} | {normalized_report_date}]",
+        "",
+        "SKIPPED_REPORT_MARKET_CLOSED",
+        "- 한국장: 휴장",
+        "- 미국장: 휴장",
+        f"- XKRX: {calendar_status.get('xkrx_reason') or 'closed'}",
+        f"- XNYS: {calendar_status.get('xnys_reason') or 'closed'}",
+        f"- 사유: {calendar_status.get('xkrx_reason') or 'closed'} / {calendar_status.get('xnys_reason') or 'closed'}",
+        "- 오늘은 양 시장 휴장으로 정규 리포트를 생략합니다.",
+        f"- 다음 한국 거래일: {calendar_status.get('xkrx_next_trading_day') or NA_TEXT}",
+        f"- 다음 미국 거래일: {calendar_status.get('xnys_next_trading_day') or NA_TEXT}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _interpret_us_10y_3y_spread(us10y, us3y) -> dict | None:
@@ -203,6 +205,15 @@ def _format_watchlist_section(prepared_snapshots: list[dict], title: str = "## W
     return lines
 
 
+def _save_report(report_type: str, report_content: str, now_kst: datetime.datetime) -> Path:
+    reports_dir = project_root / "reports"
+    reports_dir.mkdir(exist_ok=True)
+    file_path = reports_dir / f"daily_quant_report_{report_type}_{now_kst.strftime('%Y%m%d_%H%M')}.md"
+    file_path.write_text(report_content, encoding="utf-8")
+    logger.info("Report saved: %s", file_path)
+    return file_path
+
+
 def _build_simple_non_morning_report(report_type: str, report_date: str, bundle: dict) -> str:
     readiness = bundle.get("readiness") or {}
     freshness = bundle.get("freshness") or {}
@@ -231,14 +242,14 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
         f"- KOSPI: {format_number(macro.get('kospi')) if safe_float(macro.get('kospi')) is not None else '미확인'}",
         f"- KOSDAQ: {format_number(macro.get('kosdaq')) if safe_float(macro.get('kosdaq')) is not None else '미확인'}",
         f"- USD/KRW: {format_number(macro.get('usdkrw')) if safe_float(macro.get('usdkrw')) is not None else '미확인'}",
-        f"- 한 줄 요약: {_build_session_summary(report_type, macro, readiness, rankings, watchlist)}",
+        f"- 한 줄 요약: {_build_session_summary(report_type, macro, rankings, watchlist)}",
     ]
     section_no = add_section(lines, section_no, summary_title, summary_body)
 
     limitation_body = []
     if readiness.get("display_mode") != "FULL_MARKET":
         limitation_body.append(f"- {readiness.get('data_limitation_note')}")
-    if readiness.get("display_mode") == "FULL_MARKET":
+    else:
         limitation_body.append("- 전체시장 거래대금·시총 Top 해석이 가능합니다.")
     section_no = add_section(lines, section_no, "국내 데이터 범위", limitation_body)
 
@@ -299,7 +310,7 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     return "\n".join(lines).strip() + "\n"
 
 
-def _build_session_summary(report_type: str, macro: dict, readiness: dict, rankings: list[dict], watchlist: list[dict]) -> str:
+def _build_session_summary(report_type: str, macro: dict, rankings: list[dict], watchlist: list[dict]) -> str:
     usdkrw = safe_float(macro.get("usdkrw"))
     if report_type == "regular":
         if usdkrw is not None and usdkrw >= 1450:
@@ -314,7 +325,7 @@ def _build_session_summary(report_type: str, macro: dict, readiness: dict, ranki
         if label in {"강한 모멘텀 후보", "보유·관찰"}:
             strong_watch.append(row.get("name") or row.get("symbol"))
     if volume_names and strong_watch:
-        return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)}와 관심종목 후보군 {'·'.join(strong_watch[:2])} 중심으로 마감 복기를 제공합니다."
+        return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)} 중심으로 형성됐고, 관심종목 후보군은 {'·'.join(strong_watch[:2])} 중심으로 마감 복기를 제공합니다."
     if volume_names:
         return f"오늘은 KIS 거래량 상위 {'·'.join(volume_names)} 중심으로만 마감 복기를 제공합니다."
     return "오늘은 KIS 거래량 상위와 관심종목 후보군 중심으로만 마감 복기를 제공합니다."
@@ -333,12 +344,15 @@ def _build_non_morning_checkpoints(report_type: str, readiness: dict) -> list[st
         "- 관심종목 Signal 변화 확인",
     ]
     if readiness.get("display_mode") != "FULL_MARKET":
-        checkpoints.append("- 전체시장 Top 대신 관심종목·랭킹 후보 흐름에 집중")
+        checkpoints.append("- 전체시장 Top 대신 관심종목·랭킹 후보 반응에 집중")
     return checkpoints[:4]
 
 
 def _derive_watchlist_signal(row: dict) -> dict:
     score = 50.0
+    source_mixed = bool(row.get("source_mixed"))
+    data_status = str(row.get("data_status") or "").upper()
+    stale_days = safe_float(row.get("stale_days"))
     change_rate = safe_change_rate(row.get("change_rate_1d"))
     trading_ratio = safe_float(row.get("trading_value_ratio_20d"))
     foreign_flow = safe_float(row.get("foreign_net_buy"))
@@ -356,7 +370,16 @@ def _derive_watchlist_signal(row: dict) -> dict:
     if inst_flow is not None:
         score += 4 if inst_flow > 0 else -4 if inst_flow < 0 else 0
 
-    if score >= 75:
+    if source_mixed:
+        score = min(score, 58.0)
+    if stale_days is not None and stale_days > 0:
+        score = min(score, 60.0)
+    if data_status == "STALE_BUT_USABLE":
+        score = min(score, 60.0)
+
+    if source_mixed:
+        label = "관찰" if score >= 45 else "판단 유보"
+    elif score >= 75:
         label = "강한 모멘텀 후보"
     elif score >= 60:
         label = "보유·관찰"
@@ -388,25 +411,6 @@ def _translate_blocked(values: list[str]) -> list[str]:
     return [mapping.get(value, value) for value in values]
 
 
-def _build_skip_report_text(report_type: str, report_date: str, calendar_status: dict) -> str:
-    title = {
-        "morning": "Morning Brief",
-        "regular": "Regular Brief",
-        "closing": "Closing Brief",
-    }[report_type]
-    lines = [
-        f"[{title} | {report_date}]",
-        "",
-        f"- 한국장: 휴장",
-        f"- 미국장: 휴장",
-        f"- 사유: {calendar_status.get('xkrx_reason') or 'closed'} / {calendar_status.get('xnys_reason') or 'closed'}",
-        "- 오늘은 양 시장 휴장으로 정규 리포트를 생략합니다.",
-        f"- 다음 한국 거래일: {calendar_status.get('xkrx_next_trading_day') or NA_TEXT}",
-        f"- 다음 미국 거래일: {calendar_status.get('xnys_next_trading_day') or NA_TEXT}",
-    ]
-    return "\n".join(lines) + "\n"
-
-
 def run_report(
     report_type: str,
     now_kst: datetime.datetime,
@@ -424,7 +428,7 @@ def run_report(
     logger.info("telegram_config_present=%s", str(bool(telegram_token and telegram_chat_id)).lower())
 
     if _should_skip_all_markets(calendar_status):
-        skip_text = _build_skip_report_text(report_type, normalized_report_date, calendar_status)
+        skip_text = _build_market_closed_skip_text(report_type, normalized_report_date, calendar_status)
         _save_report(report_type, skip_text, now_kst)
         logger.info("telegram_skip_reason=all_markets_closed notify_on_skip=%s", str(notify_on_skip).lower())
         if send_enabled and notify_on_skip:
@@ -469,7 +473,12 @@ def main():
     args = _parse_args()
     now_kst = _get_now_kst()
     send_enabled = not (args.dry_run or args.no_send)
-    logger.info("=== Daily Report Pipeline start [type=%s dry_run=%s notify_on_skip=%s] ===", args.report_type, not send_enabled, args.notify_on_skip)
+    logger.info(
+        "=== Daily Report Pipeline start [type=%s dry_run=%s notify_on_skip=%s] ===",
+        args.report_type,
+        not send_enabled,
+        args.notify_on_skip,
+    )
     run_report(
         args.report_type,
         now_kst,

@@ -30,6 +30,49 @@ class WatchlistMorningTests(unittest.TestCase):
         self.assertIn(rows[0]["signal_label"], {"강한 모멘텀 후보", "보유·관찰"})
         self.assertNotEqual(rows[0]["quant_reasons"][0], rows[0]["positive_factors"][0])
 
+    def test_source_mixed_downgrades_label(self):
+        rows = build_watchlist_morning_scores(
+            [
+                {
+                    "symbol": "005930",
+                    "name": "삼성전자",
+                    "sector_group": "반도체",
+                    "close_price": 80000,
+                    "return_5d": 0.10,
+                    "return_20d": 0.25,
+                    "trading_value_ratio_20d": 2.1,
+                    "foreign_net_buy": 10,
+                    "institutional_net_buy": 10,
+                    "data_status": "FRESH",
+                    "source_mixed": True,
+                }
+            ],
+            {"regime_label": "Risk-on"},
+            [{"sector_group": "반도체", "label": "우호", "score": 80}],
+        )
+        self.assertNotEqual(rows[0]["signal_label"], "강한 모멘텀 후보")
+        self.assertIn("혼합", " ".join(rows[0]["negative_factors"]))
+
+    def test_return_20d_none_is_not_used_in_reasons(self):
+        rows = build_watchlist_morning_scores(
+            [
+                {
+                    "symbol": "278470",
+                    "name": "에이피알",
+                    "sector_group": "화장품/소비재",
+                    "close_price": 100000,
+                    "return_5d": 0.02,
+                    "return_20d": None,
+                    "trading_value_ratio_20d": None,
+                    "data_status": "FRESH",
+                }
+            ],
+            {"regime_label": "Neutral"},
+            [],
+        )
+        reasons = " ".join(rows[0]["quant_reasons"])
+        self.assertNotIn("20일 수익률", reasons)
+
     def test_buy_hold_sell_not_used(self):
         rows = build_watchlist_morning_scores(
             [{"symbol": "005930", "name": "삼성전자", "sector_group": "반도체", "close_price": 80000, "data_status": "FRESH"}],

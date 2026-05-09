@@ -25,6 +25,7 @@ def build_watchlist_morning_scores(watchlist_snapshot: list[dict], regime: dict,
     results.sort(
         key=lambda item: (
             1 if item.get("data_status") == "FRESH" else 0,
+            1 if not item.get("source_mixed") else 0,
             -CORE_PRIORITY.get(str(item.get("symbol") or ""), 999),
             float(item.get("score") or 0),
             float(item.get("sector_impact_score") or 0),
@@ -36,14 +37,18 @@ def build_watchlist_morning_scores(watchlist_snapshot: list[dict], regime: dict,
 
 
 def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
-    if row.get("data_status") in {"DATA_MISSING", "NO_DATA"} or row.get("close_price") in (None, ""):
+    source_mixed = bool(row.get("source_mixed"))
+    stale_days = _to_int(row.get("stale_days"))
+    data_status = str(row.get("data_status") or "").upper()
+
+    if data_status in {"DATA_MISSING", "NO_DATA"} or row.get("close_price") in (None, ""):
         return {
             "score": 0.0,
             "signal_label": "판단 유보",
-            "quant_reasons": ["핵심 수치 확인이 제한적입니다."],
+            "quant_reasons": ["핵심 가격과 거래대금 확인이 제한적입니다."],
             "positive_factors": ["데이터 갱신 이후 다시 확인하는 편이 좋습니다."],
             "negative_factors": ["가격과 수급 기준이 충분하지 않습니다."],
-            "intraday_checkpoints": ["다음 거래일 기준 수치 갱신 여부 확인"],
+            "intraday_checkpoints": ["다음 거래일 기준 데이터 갱신 여부 확인"],
             "core_priority": CORE_PRIORITY.get(str(row.get("symbol") or ""), 999),
             "sector_impact_score": float((sector_impact or {}).get("score") or 0),
         }
@@ -53,7 +58,7 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
     positives: list[str] = []
     negatives: list[str] = []
 
-    score += _momentum_score(row, quant_reasons, positives, negatives)
+    score += _momentum_score(row, quant_reasons, positives, negatives, source_mixed)
     score += _liquidity_score(row, quant_reasons, positives, negatives)
     score += _investor_score(row, quant_reasons, positives, negatives)
     score += _quality_score(row, quant_reasons, positives, negatives)
@@ -63,11 +68,22 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
     if str(row.get("symbol") or "") in CORE_PRIORITY:
         score += 4
 
+    if source_mixed:
+        negatives.append("가격 이력 원천이 혼합되어 모멘텀 판단은 보수적으로 봅니다.")
+        score = min(score, 58.0)
+    if stale_days is not None and stale_days > 0:
+        negatives.append("기준일이 하루 이상 지나 보조 신호로만 봅니다.")
+        score = min(score, 60.0)
+    if data_status == "STALE_BUT_USABLE":
+        score = min(score, 60.0)
+
+    label = _label(score, source_mixed=source_mixed, data_status=data_status)
+
     return {
         "score": round(max(0.0, min(100.0, score)), 1),
-        "signal_label": _label(score),
+        "signal_label": label,
         "quant_reasons": _dedupe(quant_reasons)[:3],
-        "positive_factors": _dedupe(positives)[:3],
+        "positive_factors": _dedupe(positives)[:2],
         "negative_factors": _dedupe(negatives)[:3],
         "intraday_checkpoints": _build_checkpoints(row, sector_impact),
         "core_priority": CORE_PRIORITY.get(str(row.get("symbol") or ""), 999),
@@ -75,20 +91,26 @@ def _score_row(row: dict, regime: dict, sector_impact: dict | None) -> dict:
     }
 
 
-def _momentum_score(row: dict, quant_reasons: list[str], positives: list[str], negatives: list[str]) -> float:
+def _momentum_score(row: dict, quant_reasons: list[str], positives: list[str], negatives: list[str], source_mixed: bool) -> float:
     delta = 0.0
-    for field, label, weight in (("return_5d", "5일 수익률", 16), ("return_20d", "20일 수익률", 12), ("return_60d", "60일 수익률", 8)):
+    for field, label, weight in (
+        ("return_5d", "5일 수익률", 16),
+        ("return_20d", "20일 수익률", 12),
+        ("return_60d", "60일 수익률", 8),
+    ):
         value = safe_float(row.get(field))
         if value is None:
             continue
         quant_reasons.append(f"{label} {value:+.2%}")
+        if source_mixed and field in {"return_5d", "return_20d"}:
+            continue
         if value > 0:
             delta += min(value * weight * 100, 12)
         elif value < 0:
             delta += max(value * weight * 100, -12)
 
     return_5d = safe_float(row.get("return_5d"))
-    if return_5d is not None and return_5d > 0:
+    if not source_mixed and return_5d is not None and return_5d > 0:
         positives.append("단기 주가 흐름이 상승 쪽으로 유지되고 있습니다.")
     elif return_5d is not None and return_5d < 0:
         negatives.append("단기 주가 흐름이 약해 반전 확인이 필요합니다.")
@@ -169,14 +191,14 @@ def _macro_fit(regime: dict, sector_impact: dict | None, positives: list[str], n
     if regime_label in {"Risk-on", "Mild risk-on"}:
         delta += 4
     elif regime_label == "Risk-off":
-        negatives.append("전반적인 위험회피 구간에서는 추격보다 확인 대응이 적절합니다.")
+        negatives.append("전반적인 위험회피 구간에서는 추격보다 확인 대응이 유리합니다.")
         delta -= 4
 
     if sector_impact:
         label = sector_impact.get("label")
         sector_name = sector_impact.get("sector_group")
         if label == "우호":
-            positives.append(f"{sector_name} 섹터 흐름이 받쳐줘 종목 해석에도 우호적입니다.")
+            positives.append(f"{sector_name} 섹터 흐름이 받쳐주면 종목 해석도 우호적입니다.")
             delta += 5
         elif label == "주의":
             negatives.append(f"{sector_name} 섹터 흐름이 약해 종목 대응도 보수적으로 보는 편이 좋습니다.")
@@ -186,16 +208,27 @@ def _macro_fit(regime: dict, sector_impact: dict | None, positives: list[str], n
 
 def _build_checkpoints(row: dict, sector_impact: dict | None) -> list[str]:
     sector_name = (sector_impact or {}).get("sector_group") or row.get("sector_group") or "관심 섹터"
-    checkpoints = [f"{sector_name} 거래대금과 수급 지속 여부"]
-    ratio = safe_float(row.get("trading_value_ratio_20d"))
-    if ratio is not None and ratio >= 2:
-        checkpoints.append("개장 후 거래대금 급증이 이어지는지 확인")
-    else:
-        checkpoints.append("초반 수급 반응과 거래대금 회복 여부 확인")
-    return checkpoints[:2]
+    return [
+        f"{sector_name} 거래대금과 수급 지속 여부",
+        "개장 후 가격 흐름이 강세를 유지하는지 확인",
+    ]
 
 
-def _label(score: float) -> str:
+def _label(score: float, source_mixed: bool = False, data_status: str | None = None) -> str:
+    if data_status in {"DATA_MISSING", "NO_DATA"}:
+        return "판단 유보"
+    if source_mixed:
+        if score >= 45:
+            return "관찰"
+        return "판단 유보"
+    if data_status == "STALE_BUT_USABLE":
+        if score >= 60:
+            return "보유·관찰"
+        if score >= 45:
+            return "관망"
+        if score >= 30:
+            return "리스크 관리 후보"
+        return "판단 유보"
     if score >= 75:
         return "강한 모멘텀 후보"
     if score >= 60:
@@ -217,3 +250,12 @@ def _dedupe(items: list[str]) -> list[str]:
         seen.add(text)
         results.append(text)
     return results
+
+
+def _to_int(value) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None

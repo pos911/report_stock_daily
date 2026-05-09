@@ -81,7 +81,17 @@ def format_bp(value) -> str:
 
 
 def format_spread_bp(value) -> str:
-    return format_bp(value)
+    numeric = safe_float(value)
+    if numeric is None:
+        return NA_TEXT
+    return f"{numeric * 100:+.1f}bp"
+
+
+def format_yield_spread(value, change_bp=None) -> str:
+    spread_text = format_spread_bp(value)
+    if change_bp is None:
+        return spread_text
+    return f"{spread_text} / 전일대비 {format_bp(change_bp)}"
 
 
 def format_usdkrw(value) -> str:

@@ -28,6 +28,7 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     rankings = bundle.get("rankings") or []
     readiness = bundle.get("readiness") or {}
     contract_failed_views = bundle.get("contract_failed_views") or []
+    watchlist_diagnostics = bundle.get("watchlist_diagnostics") or {}
 
     regime = build_global_morning_regime(macro, freshness)
     sector_impacts = build_sector_morning_impacts(regime, sector_etfs, rankings, watchlist)
@@ -63,6 +64,7 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
         "intraday_checkpoints": [line[2:] for line in build_checkpoints_section(top_sectors, freshness, readiness)] or ["체크포인트 없음"],
         "data_freshness_manifest": freshness,
         "watchlist_coverage_status": freshness.get("watchlist_coverage_status"),
+        "watchlist_diagnostics": watchlist_diagnostics,
         "scale_warnings": scale_warnings,
         "stockdata_readiness": readiness,
         "report_allowed_sections": readiness.get("report_allowed_sections") or [],

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from src.utils.formatters import safe_change_rate, safe_float
+from src.utils.formatters import format_pct, safe_change_rate, safe_float
 
 
 SECTOR_CANONICAL_MAP = {
@@ -34,7 +34,7 @@ def build_sector_morning_impacts(regime: dict, sector_etf_signals: list[dict], m
             continue
 
         warnings = list(primary.get("warnings") or [])
-        macro_score, global_reason = _macro_fit(sector, regime, primary)
+        macro_score, global_reason = _macro_fit(sector, regime)
         etf_score, etf_reason = _etf_reason(primary, warnings)
         leading_score, leading_reason = _leading_reason(sector, market_rankings, watchlist_snapshot)
         investor_score, investor_reason = _investor_reason(primary)
@@ -45,7 +45,7 @@ def build_sector_morning_impacts(regime: dict, sector_etf_signals: list[dict], m
             weights["etf"] = 0.0
             warnings.append("Speculative ETF excluded")
         elif primary.get("data_status") == "STALE_BUT_USABLE":
-            weights["etf"] = 0.15
+            weights["etf"] = 0.10
             warnings.append("ETF stale but usable")
         elif primary.get("data_status") in {"STALE", "NO_DATA"}:
             weights["etf"] = 0.0
@@ -58,7 +58,8 @@ def build_sector_morning_impacts(regime: dict, sector_etf_signals: list[dict], m
             + investor_score * weights["investor"]
             + risk_score * weights["risk"]
         ) / max(sum(weights.values()), 0.01)
-        if sector == "반도체" and primary.get("data_status") == "FRESH" and "sox" in " ".join(regime.get("positive_drivers") or []).lower():
+        positive_text = " ".join(regime.get("positive_drivers") or []).lower()
+        if sector == "반도체" and primary.get("data_status") == "FRESH" and "sox" in positive_text:
             total = max(total, 76.0)
 
         results.append(
@@ -80,6 +81,7 @@ def build_sector_morning_impacts(regime: dict, sector_etf_signals: list[dict], m
                 "change_rate_1d": primary.get("change_rate_1d"),
                 "return_20d": primary.get("return_20d"),
                 "trading_value_ratio_20d": primary.get("trading_value_ratio_20d"),
+                "stale_days": primary.get("stale_days"),
             }
         )
 
@@ -103,7 +105,7 @@ def _pick_primary(rows: list[dict]) -> dict | None:
     return candidates[0]
 
 
-def _macro_fit(sector: str, regime: dict, primary: dict) -> tuple[float, str]:
+def _macro_fit(sector: str, regime: dict) -> tuple[float, str]:
     positive_text = " ".join(regime.get("positive_drivers") or []).lower()
     negative_text = " ".join(regime.get("negative_drivers") or []).lower()
     regime_label = regime.get("regime_label")
@@ -126,22 +128,22 @@ def _macro_fit(sector: str, regime: dict, primary: dict) -> tuple[float, str]:
             reasons.append("성장주 선호가 유지되면 2차전지 심리에도 도움이 됩니다.")
         if "us10y" in positive_text:
             score += 8
-            reasons.append("미국 장기금리 부담 완화는 성장주 밸류에이션에 우호적입니다.")
+            reasons.append("미국 장기금리 부담 완화가 성장주 밸류에이션에 우호적입니다.")
     elif sector in {"조선", "방산"}:
         if "usdkrw" in negative_text:
             score += 5
-            reasons.append("원화 약세는 수출 비중이 높은 업종에는 일부 우호적입니다.")
+            reasons.append("원화 약세는 수출 비중이 높은 업종에 일부 우호적일 수 있습니다.")
     elif sector == "금융/증권" and regime_label in {"Risk-on", "Mild risk-on"}:
         score += 8
-        reasons.append("위험선호 회복은 거래대금 확대 기대와 연결될 수 있습니다.")
+        reasons.append("위험선호 회복은 거래대금 반등 기대와 연결될 수 있습니다.")
     elif sector == "바이오/헬스케어":
         if "nasdaq" in positive_text:
             score += 5
-            reasons.append("미국 성장주 심리 회복이 바이오에도 우호적입니다.")
+            reasons.append("미국 성장주 심리 회복은 바이오에도 우호적입니다.")
     elif sector == "정유화학":
         if "brent" in positive_text:
             score -= 4
-            reasons.append("유가 상승이 화학 업종에는 비용 부담일 수 있습니다.")
+            reasons.append("유가 상승은 화학 업종에는 비용 부담으로 이어질 수 있습니다.")
 
     return max(0.0, min(100.0, score)), " ".join(reasons) or "매크로 적합도는 중립입니다."
 
@@ -151,39 +153,50 @@ def _etf_reason(primary: dict, warnings: list[str]) -> tuple[float, str]:
         warnings.append("Speculative ETF excluded")
         return 50.0, "레버리지 ETF 급등은 주근거가 아닌 과열 참고 신호로만 해석합니다."
     if primary.get("data_status") in {"STALE", "NO_DATA"}:
-        return 40.0, "대표 ETF 데이터 기준일이 오래돼 정량 판단은 제한적으로만 봅니다."
+        return 40.0, "대표 ETF 데이터가 오래돼 ETF 기반 정량 판단은 제한적으로만 봅니다."
+    if primary.get("data_status") == "STALE_BUT_USABLE":
+        score = 50.0
+        reasons = ["대표 ETF 기준일이 하루 이상 지나 보조 신호로만 봅니다."]
+        change_rate = safe_change_rate(primary.get("change_rate_1d"))
+        if change_rate is not None:
+            reasons.append(f"최근 등락은 {format_pct(change_rate)} 수준입니다.")
+        return score, " ".join(reasons)
 
     score = 55.0
     reasons: list[str] = []
     change_rate = safe_change_rate(primary.get("change_rate_1d"))
     ret20 = safe_change_rate(primary.get("return_20d"))
     tv_ratio = safe_float(primary.get("trading_value_ratio_20d"))
+    near_high = safe_float(primary.get("near_52w_high_pct"))
 
     if change_rate is not None:
         score += min(max(change_rate * 200, -12), 12)
-        reasons.append(f"단기 가격 흐름 {change_rate:+.2%}")
+        reasons.append(f"단기 가격 흐름이 {format_pct(change_rate)}로 움직였습니다.")
     if ret20 is not None:
         score += min(max(ret20 * 100, -10), 10)
-        reasons.append(f"20일 기준 흐름 {ret20:+.2%}")
+        reasons.append(f"20일 기준 추세는 {format_pct(ret20)}입니다.")
     if tv_ratio is not None:
         if tv_ratio >= 1:
             score += min((tv_ratio - 1) * 8, 8)
-            reasons.append(f"거래대금 20일 평균 대비 {tv_ratio:.2f}배")
-        else:
-            reasons.append(f"거래대금 20일 평균 대비 {tv_ratio:.2f}배")
-    return max(0.0, min(100.0, score)), ". ".join(_dedupe(reasons)) + "."
+        reasons.append(f"거래대금은 20일 평균 대비 {tv_ratio:.2f}배입니다.")
+    if near_high is not None and near_high >= 95:
+        reasons.append(f"52주 고가 대비 {near_high:.1f}% 수준이라 추격 부담은 있습니다.")
+    return max(0.0, min(100.0, score)), " ".join(_dedupe(reasons))
 
 
 def _leading_reason(sector: str, rankings: list[dict], watchlist_snapshot: list[dict]) -> tuple[float, str]:
-    ranked_names = [str(row.get("name") or "") for row in rankings]
     sector_watch = [row for row in watchlist_snapshot if str(row.get("sector_group") or "") == sector]
     if sector_watch:
-        hot_watch = [row for row in sector_watch if (safe_float(row.get("trading_value_ratio_20d")) or 0) >= 1.2]
+        hot_watch = [
+            row for row in sector_watch
+            if not row.get("source_mixed") and (safe_float(row.get("trading_value_ratio_20d")) or 0) >= 1.2
+        ]
         if hot_watch:
             return 68.0, "관심종목·랭킹 후보 중 거래대금이 붙는 종목이 확인됩니다."
+    ranked_names = [str(row.get("name") or "") for row in rankings]
     if any(sector in name for name in ranked_names):
         return 62.0, "관련 종목이 시장 랭킹에 진입했습니다."
-    return 50.0, "대표 종목 근거는 제한적입니다."
+    return 50.0, "대표 종목 확인 근거는 제한적입니다."
 
 
 def _investor_reason(primary: dict) -> tuple[float, str]:
@@ -192,7 +205,7 @@ def _investor_reason(primary: dict) -> tuple[float, str]:
     foreign = safe_float(primary.get("foreign_net_buy"))
     inst = safe_float(primary.get("institutional_net_buy"))
     if foreign is None and inst is None:
-        return score, "Investor flow unavailable"
+        return score, "수급 확인이 제한적입니다."
     if foreign is not None:
         if foreign > 0:
             score += 10
@@ -203,7 +216,7 @@ def _investor_reason(primary: dict) -> tuple[float, str]:
     if inst is not None:
         if inst > 0:
             score += 5
-            reasons.append("기관 수급이 받쳐줍니다.")
+            reasons.append("기관 수급도 보조적으로 받쳐줍니다.")
         elif inst < 0:
             score -= 5
             reasons.append("기관 수급은 부담입니다.")
@@ -241,11 +254,14 @@ def _label(score: float, data_status: str | None) -> str:
 
 
 def _checkpoints(sector: str, primary: dict) -> list[str]:
-    points = [f"{sector} 대표 ETF 거래대금 유지 여부"]
+    points = []
     if primary.get("data_status") == "FRESH":
-        points.append(f"{sector} 관련 종목의 수급 확산 여부")
+        points.append(f"{sector} 대표 ETF 거래대금과 수급 방향 확인")
+    elif primary.get("data_status") == "STALE_BUT_USABLE":
+        points.append(f"{sector} 대표 ETF는 보조 신호로만 보고 개별 종목 반응을 우선 확인")
     if primary.get("exclude_from_signal"):
-        points.append("레버리지 ETF 급등이 현물 강세로 확산되는지 분리 확인")
+        points.append("레버리지 ETF 과열이 일반 ETF로 확산되는지 분리 확인")
+    points.append(f"{sector} 관련 관심종목·랭킹 후보 반응 확인")
     return points[:3]
 
 

@@ -36,6 +36,7 @@ class SupabaseStockDataReader:
     def __init__(self, base_reader: SupabaseReader | None = None):
         self.base_reader = base_reader or SupabaseReader()
         self.client = self.base_reader.client
+        self._last_watchlist_diagnostics: dict[str, Any] = {}
 
     def get_report_contract_bundle(self, report_type: str = "morning", target_date: str | None = None) -> dict:
         freshness = self.get_report_data_freshness(target_date)
@@ -67,6 +68,7 @@ class SupabaseStockDataReader:
             "macro": macro,
             "sector_etfs": sector_etfs,
             "watchlist": watchlist,
+            "watchlist_diagnostics": dict(self._last_watchlist_diagnostics),
             "rankings": rankings,
             "readiness": readiness,
             "contract_fallback_used": fallback_used,
@@ -237,22 +239,46 @@ class SupabaseStockDataReader:
     def get_watchlist_snapshot(self, target_date: str | None = None) -> list[dict]:
         view_rows = self._fetch_view_rows("report_watchlist_snapshot_view", limit=2000, order_column="base_date")
         contract_fallback_used = not bool(view_rows)
+        active_universe = self.base_reader.fetch_static_stock_universe()
+        active_symbols = {
+            canonicalize_symbol(row.get("symbol"))
+            for row in active_universe
+            if canonicalize_symbol(row.get("symbol"))
+        }
+        metadata_map = self._build_watchlist_metadata_map(active_universe)
+        raw_row_count = len(view_rows)
+        quality_map = self._fetch_watchlist_quality_map(sorted(active_symbols))
         normalized_rows = [
-            self._normalize_watchlist_row(row, contract_fallback_used=contract_fallback_used, target_date=target_date)
+            self._normalize_watchlist_row(
+                row,
+                contract_fallback_used=contract_fallback_used,
+                target_date=target_date,
+                quality_hint=quality_map.get(canonicalize_symbol(row.get("symbol"))),
+            )
             for row in view_rows
         ]
         if contract_fallback_used:
-            normalized_rows = [self._normalize_watchlist_row(row, contract_fallback_used=True) for row in self._build_watchlist_fallback(target_date)]
-        required = load_report_required_stock_universe()
-        by_symbol = {row["symbol"]: row for row in normalized_rows}
-        for required_row in required:
-            symbol = required_row["symbol"]
+            fallback_rows = self._build_watchlist_fallback(target_date, symbols=sorted(active_symbols), metadata_map=metadata_map)
+            raw_row_count = len(fallback_rows)
+            normalized_rows = [
+                self._normalize_watchlist_row(
+                    row,
+                    contract_fallback_used=True,
+                    target_date=target_date,
+                    quality_hint=quality_map.get(canonicalize_symbol(row.get("symbol"))),
+                )
+                for row in fallback_rows
+            ]
+        filtered_rows = [row for row in normalized_rows if row.get("symbol") in active_symbols] if active_symbols else normalized_rows
+        by_symbol = {row["symbol"]: row for row in filtered_rows}
+        for symbol in sorted(active_symbols):
             if symbol not in by_symbol:
+                meta = metadata_map.get(symbol, {})
                 by_symbol[symbol] = {
                     "symbol": symbol,
-                    "name": required_row.get("name") or symbol,
-                    "market": required_row.get("market"),
-                    "sector_group": required_row.get("sector_group"),
+                    "name": meta.get("name") or symbol,
+                    "market": meta.get("market"),
+                    "sector_group": meta.get("sector_group"),
                     "close_price": None,
                     "change_rate_1d": None,
                     "return_5d": None,
@@ -271,10 +297,21 @@ class SupabaseStockDataReader:
                     "roe": None,
                     "debt_ratio": None,
                     "data_status": "DATA_MISSING",
+                    "stale_days": None,
+                    "source_mixed": bool((quality_map.get(symbol) or {}).get("source_mixed")),
+                    "data_quality_flag": (quality_map.get(symbol) or {}).get("data_quality_flag"),
+                    "source_consistency_status": (quality_map.get(symbol) or {}).get("source_consistency_status"),
                     "contract_fallback_used": contract_fallback_used,
                     "warnings": ["watchlist row missing from report_watchlist_snapshot_view"],
                 }
-        return [by_symbol[symbol] for symbol in sorted(by_symbol)]
+        ordered = [by_symbol[symbol] for symbol in sorted(by_symbol)]
+        self._last_watchlist_diagnostics = {
+            "raw_row_count": raw_row_count,
+            "active_row_count": len(ordered),
+            "active_symbol_count": len(active_symbols),
+            "active_symbols": sorted(active_symbols),
+        }
+        return ordered
 
     def get_market_rankings(self, target_date: str | None = None) -> list[dict]:
         rows = self._fetch_view_rows("report_market_ranking_view", limit=1000, order_column="base_date")
@@ -471,7 +508,13 @@ class SupabaseStockDataReader:
             normalized["warnings"].append("OVERHEATED_20D")
         return normalized
 
-    def _normalize_watchlist_row(self, row: dict, contract_fallback_used: bool, target_date: str | None = None) -> dict:
+    def _normalize_watchlist_row(
+        self,
+        row: dict,
+        contract_fallback_used: bool,
+        target_date: str | None = None,
+        quality_hint: dict | None = None,
+    ) -> dict:
         normalized = {
             **row,
             "symbol": canonicalize_symbol(row.get("symbol")),
@@ -481,6 +524,19 @@ class SupabaseStockDataReader:
         }
         base_date = normalized.get("base_date")
         normalized["data_status"] = self._status_for_row(base_date, normalized.get("data_status"), target_date, missing_label="DATA_MISSING")
+        normalized["stale_days"] = self._calc_stale_days(base_date, self._normalize_date(target_date) if target_date else None)
+        mixed_quality = quality_hint or {}
+        data_quality_flag = normalized.get("data_quality_flag") or mixed_quality.get("data_quality_flag")
+        consistency_status = normalized.get("source_consistency_status") or mixed_quality.get("source_consistency_status")
+        source_mixed = self._resolve_source_mixed(
+            explicit_value=normalized.get("source_mixed"),
+            data_quality_flag=data_quality_flag,
+            consistency_status=consistency_status,
+            quality_hint=mixed_quality,
+        )
+        normalized["data_quality_flag"] = data_quality_flag
+        normalized["source_consistency_status"] = consistency_status
+        normalized["source_mixed"] = source_mixed
         return normalized
 
     def _normalize_ranking_row(self, row: dict, contract_fallback_used: bool, target_date: str | None = None) -> dict:
@@ -552,10 +608,16 @@ class SupabaseStockDataReader:
             )
         return fallback_rows
 
-    def _build_watchlist_fallback(self, target_date: str | None = None) -> list[dict]:
+    def _build_watchlist_fallback(
+        self,
+        target_date: str | None = None,
+        symbols: list[str] | None = None,
+        metadata_map: dict[str, dict] | None = None,
+    ) -> list[dict]:
         target = self._normalize_date(target_date)
-        required_rows = load_report_required_stock_universe()
-        symbols = [row["symbol"] for row in required_rows if row.get("is_active", True)]
+        metadata = metadata_map or self._build_watchlist_metadata_map(self.base_reader.fetch_static_stock_universe())
+        if symbols is None:
+            symbols = sorted(metadata)
         price_history = self._fetch_rows_for_symbols(
             "normalized_stock_prices_daily",
             "symbol, base_date, close_price, volume, trading_value",
@@ -589,8 +651,8 @@ class SupabaseStockDataReader:
         )
 
         fallback_rows = []
-        for item in required_rows:
-            symbol = item["symbol"]
+        for symbol in symbols:
+            item = metadata.get(symbol, {})
             price = price_metrics.get(symbol, {})
             supply = supply_map.get(symbol, {})
             short = short_map.get(symbol, {})
@@ -620,10 +682,65 @@ class SupabaseStockDataReader:
                     "roe": fundamentals.get("roe"),
                     "debt_ratio": fundamentals.get("debt_ratio"),
                     "data_status": self._stale_status(price.get("base_date"), target, missing_label="DATA_MISSING"),
+                    "stale_days": self._calc_stale_days(price.get("base_date"), target),
+                    "source_mixed": False,
                     "warnings": ["contract fallback used: report_watchlist_snapshot_view unavailable"],
                 }
             )
         return fallback_rows
+
+    def _build_watchlist_metadata_map(self, active_universe: list[dict]) -> dict[str, dict]:
+        metadata = {}
+        required_map = {
+            canonicalize_symbol(row.get("symbol")): row
+            for row in load_report_required_stock_universe()
+            if canonicalize_symbol(row.get("symbol"))
+        }
+        for row in active_universe:
+            symbol = canonicalize_symbol(row.get("symbol"))
+            if not symbol:
+                continue
+            required = required_map.get(symbol, {})
+            metadata[symbol] = {
+                "symbol": symbol,
+                "name": row.get("name") or required.get("name") or symbol,
+                "market": row.get("market") or required.get("market"),
+                "sector_group": required.get("sector_group"),
+            }
+        return metadata
+
+    def _fetch_watchlist_quality_map(self, symbols: list[str]) -> dict[str, dict]:
+        if not symbols:
+            return {}
+        quality_map: dict[str, dict] = {}
+        direct_rows = self._fetch_rows_for_symbols(
+            "feature_store_daily",
+            "symbol, base_date, feature_name, feature_value",
+            symbols,
+            limit=5000,
+        )
+        grouped: dict[str, dict] = {}
+        for row in direct_rows:
+            symbol = canonicalize_symbol(row.get("symbol"))
+            feature_name = str(row.get("feature_name") or "").strip()
+            if not symbol or not feature_name:
+                continue
+            feature_bucket = grouped.setdefault(symbol, {"base_date": row.get("base_date")})
+            feature_bucket[feature_name] = row.get("feature_value")
+
+        for symbol, feature_bucket in grouped.items():
+            quality_map[symbol] = {
+                "source_mixed": self._resolve_source_mixed(
+                    explicit_value=feature_bucket.get("source_mixed"),
+                    data_quality_flag=feature_bucket.get("data_quality_flag"),
+                    consistency_status=feature_bucket.get("source_consistency_status"),
+                    quality_hint=None,
+                ),
+                "data_quality_flag": feature_bucket.get("data_quality_flag"),
+                "source_consistency_status": feature_bucket.get("source_consistency_status"),
+                "base_date": feature_bucket.get("base_date"),
+            }
+        return quality_map
 
     def _fetch_rows_for_symbols(self, table_name: str, columns: str, symbols: list[str], limit: int = 10000) -> list[dict]:
         if not symbols:
@@ -734,6 +851,19 @@ class SupabaseStockDataReader:
         if stale_but_usable_days is not None and stale_days >= 1:
             return "STALE_BUT_USABLE"
         return "FRESH"
+
+    def _resolve_source_mixed(self, explicit_value, data_quality_flag, consistency_status, quality_hint: dict | None) -> bool:
+        if isinstance(explicit_value, bool):
+            return explicit_value
+        if str(data_quality_flag or "").upper() == "SOURCE_MIXED":
+            return True
+        if str(consistency_status or "").upper().startswith("SOURCE_MIXED"):
+            return True
+        if quality_hint and quality_hint.get("source_mixed") is True:
+            return True
+        if str(explicit_value or "").strip().lower() in {"true", "t", "1", "yes"}:
+            return True
+        return False
 
     @staticmethod
     def _to_float(value: Any) -> float | None:

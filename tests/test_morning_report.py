@@ -47,8 +47,8 @@ class MorningReportTests(unittest.TestCase):
                 "us10y_change_bp": -3.0,
                 "us3y": 3.98,
                 "us3y_change_bp": 7.0,
-                "us10y_us3y_spread": 0.44,
-                "us10y_us3y_spread_change_bp": -10.0,
+                "us10y_us3y_spread": 0.468,
+                "us10y_us3y_spread_change_bp": -4.4,
                 "kr10y": 3.93,
                 "kr10y_change_bp": 0.0,
                 "brent": 110.43,
@@ -96,10 +96,11 @@ class MorningReportTests(unittest.TestCase):
                 },
             ],
             "watchlist": [
-                {"symbol": "000660", "name": "SK하이닉스", "market": "KOSPI", "sector_group": "반도체", "close_price": 1686000, "return_5d": 0.1812, "return_20d": 0.26, "return_60d": 0.40, "trading_value_ratio_20d": 2.89, "foreign_net_buy": 12, "institutional_net_buy": 2, "roe": 18, "debt_ratio": 25, "short_ratio": 1, "data_status": "FRESH"},
-                {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "sector_group": "반도체", "close_price": 268500, "return_5d": 0.0592, "return_20d": 0.2040, "return_60d": 0.24, "trading_value_ratio_20d": 1.48, "foreign_net_buy": 10, "institutional_net_buy": 4, "roe": 15, "debt_ratio": 20, "short_ratio": 1, "data_status": "FRESH"},
-                {"symbol": "071050", "name": "한국금융지주", "market": "KOSPI", "sector_group": "금융/증권", "close_price": 100000, "return_5d": 0.0116, "return_20d": 0.2358, "return_60d": 0.3113, "trading_value_ratio_20d": 1.10, "foreign_net_buy": 3, "institutional_net_buy": 1, "roe": 14, "debt_ratio": 160, "short_ratio": 5.2, "data_status": "FRESH"},
+                {"symbol": "000660", "name": "SK하이닉스", "market": "KOSPI", "sector_group": "반도체", "close_price": 1686000, "return_5d": 0.1812, "return_20d": None, "return_60d": 0.40, "trading_value_ratio_20d": None, "foreign_net_buy": 12, "institutional_net_buy": 2, "roe": 18, "debt_ratio": 25, "short_ratio": 1, "data_status": "FRESH", "source_mixed": True, "stale_days": 0},
+                {"symbol": "005930", "name": "삼성전자", "market": "KOSPI", "sector_group": "반도체", "close_price": 268500, "return_5d": 0.0592, "return_20d": None, "return_60d": 0.24, "trading_value_ratio_20d": None, "foreign_net_buy": 10, "institutional_net_buy": 4, "roe": 15, "debt_ratio": 20, "short_ratio": 1, "data_status": "FRESH", "source_mixed": True, "stale_days": 0},
+                {"symbol": "071050", "name": "한국금융지주", "market": "KOSPI", "sector_group": "금융/증권", "close_price": 100000, "return_5d": 0.0116, "return_20d": 0.2358, "return_60d": 0.3113, "trading_value_ratio_20d": 1.10, "foreign_net_buy": 3, "institutional_net_buy": 1, "roe": 14, "debt_ratio": 160, "short_ratio": 5.2, "data_status": "STALE_BUT_USABLE", "source_mixed": False, "stale_days": 1},
             ],
+            "watchlist_diagnostics": {"raw_row_count": 21, "active_row_count": 7},
             "rankings": [{"symbol": "005930", "name": "삼성전자", "rank_type": "volume", "rank": 1, "source": "KIS", "market": "KOSPI"}],
             "readiness": {
                 "kr_full_market_price_ready": False,
@@ -157,6 +158,7 @@ class MorningReportTests(unittest.TestCase):
             "display_mode",
             "data_limitation_note",
             "scale_warnings",
+            "watchlist_diagnostics",
         ]:
             self.assertIn(key, snapshot)
 
@@ -167,6 +169,7 @@ class MorningReportTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(payload["report_date"], "2026-05-05")
             self.assertEqual(payload["display_mode"], "KIS_UNIVERSE_ONLY")
+            self.assertEqual(payload["watchlist_diagnostics"]["raw_row_count"], 21)
 
 
 if __name__ == "__main__":

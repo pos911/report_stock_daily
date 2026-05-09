@@ -13,6 +13,7 @@ from src.utils.formatters import (
     format_trading_value,
     format_usdkrw,
     format_volume,
+    format_yield_spread,
     safe_change_rate,
 )
 
@@ -44,9 +45,10 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_market_cap(None), NA_TEXT)
 
     def test_format_spread_bp(self):
-        self.assertEqual(format_spread_bp(50.2), "+50.2bp")
+        self.assertEqual(format_spread_bp(0.468), "+46.8bp")
         self.assertEqual(format_bp(-20.5), "-20.5bp")
         self.assertEqual(format_spread_bp(None), NA_TEXT)
+        self.assertEqual(format_yield_spread(0.468, -4.4), "+46.8bp / 전일대비 -4.4bp")
 
     def test_market_anomaly_warning(self):
         self.assertIsNotNone(detect_market_value_anomaly("KOSPI", 7498))

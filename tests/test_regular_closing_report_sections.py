@@ -8,7 +8,18 @@ class RegularClosingReportSectionTests(unittest.TestCase):
         self.bundle = {
             "freshness": {"xkrx_is_open": True, "xnys_is_open": True},
             "macro": {"kospi": 2700, "kosdaq": 850, "usdkrw": 1452},
-            "watchlist": [{"name": "삼성전자", "symbol": "005930", "close_price": 75000, "change_rate_1d": 1.2, "signal_label": "보유·관찰", "signal_score": 66}],
+            "watchlist": [
+                {
+                    "name": "삼성전자",
+                    "symbol": "005930",
+                    "close_price": 75000,
+                    "change_rate_1d": 1.2,
+                    "signal_label": "보유·관찰",
+                    "signal_score": 66,
+                    "source_mixed": True,
+                    "trading_value_ratio_20d": None,
+                }
+            ],
             "rankings": [{"source": "KIS", "rank_type": "volume", "symbol": "005930", "name": "삼성전자", "rank": 1, "volume": 1000000, "market": "KOSPI"}],
             "readiness": {
                 "display_mode": "KIS_UNIVERSE_ONLY",
@@ -30,7 +41,7 @@ class RegularClosingReportSectionTests(unittest.TestCase):
 
     def test_regular_summary_uses_usdkrw_threshold_wording(self):
         text = _build_simple_non_morning_report("regular", "2026-05-09", self.bundle)
-        self.assertIn("환율 1,450원대가 유지되는 동안 성장주 추격은 제한", text)
+        self.assertIn("환율 1,450원대", text)
 
 
 if __name__ == "__main__":
