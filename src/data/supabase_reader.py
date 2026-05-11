@@ -335,10 +335,13 @@ class SupabaseReader:
         else:
             report_blocked_sections.append("kr_full_market_market_cap_top")
 
-        # 10. data_limitation_note
+# 10. data_limitation_note
         data_limitation_note = ""
         if not kr_full_market_price_ready:
-            data_limitation_note = "국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다. 거래량 상위는 KIS ranking 기준으로 참고 제공합니다."
+            data_limitation_note = (
+                "국내 리포트는 KIS 유니버스 기반으로 운영합니다. "
+                "전체시장 거래대금·시총 Top은 사용하지 않고, KIS 거래량 후보와 관심종목 중심으로 해석합니다."
+            )
 
         return {
             "latest_xkrx_trading_day": latest_xkrx_trading_day,

@@ -197,7 +197,7 @@ class ReportOutputQualityTests(unittest.TestCase):
                 "blocked_korean_sections": ["kr_full_market_trading_value_top", "kr_full_market_market_cap_top"],
                 "report_allowed_sections": ["macro", "us_market", "kis_volume_top", "watchlist_signal"],
                 "report_blocked_sections": ["kr_full_market_trading_value_top", "kr_full_market_market_cap_top"],
-                "data_limitation_note": "국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다. 국내 종목은 KIS ranking·관심종목 후보군 중심으로 제한 제공합니다.",
+                "data_limitation_note": "국내 리포트는 KIS 유니버스 기반으로 운영합니다. 전체시장 거래대금·시총 Top은 사용하지 않고, KIS 거래량 후보와 관심종목 중심으로 해석합니다.",
             },
         }
 
@@ -213,6 +213,14 @@ class ReportOutputQualityTests(unittest.TestCase):
             self.assertNotIn("비중확대 후보", text)
             self.assertNotIn("리스크 축소 후보", text)
             self.assertNotIn("전체시장 거래대금 상위", text)
+            self.assertNotIn("관련 뉴스를 참고", text)
+            self.assertNotIn("새로운 수주 계약", text)
+            self.assertNotIn("삼성전자 실적 발표 관련 뉴스", text)
+            self.assertNotIn("외국인 투자자 동향", text)
+            self.assertNotIn("외국인 선물 방향", text)
+            self.assertNotIn("기술적 반등", text)
+            self.assertNotIn("업황 및 경쟁사 동향", text)
+            self.assertNotIn("특정 이슈", text)
 
     def test_allowed_labels_are_present(self):
         regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)
@@ -226,9 +234,11 @@ class ReportOutputQualityTests(unittest.TestCase):
         self.assertNotIn("기대은", morning)
         self.assertNotIn("부담는", morning)
 
-    def test_scale_warning_not_shown_for_high_level_only(self):
+    def test_index_quality_warning_is_shown_for_suspicious_index(self):
         morning = generate_morning_brief(self.bundle, "2026-05-08")["report_text"]
-        self.assertNotIn("일부 지수·종목 가격은 원천 스케일 확인이 필요합니다.", morning)
+        regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)
+        self.assertIn("지수 원천 확인 필요", morning)
+        self.assertIn("지수 원천 확인 필요", regular)
 
     def test_closing_has_recap_line(self):
         closing = _build_simple_non_morning_report("closing", "2026-05-08", self.bundle)
@@ -281,11 +291,17 @@ class ReportOutputQualityTests(unittest.TestCase):
         closing = _build_simple_non_morning_report("closing", "2026-05-08", self.bundle)
         for text in [morning, regular, closing]:
             self.assertNotIn("2차전지과", text)
+            self.assertNotIn("반도체·조선와", text)
             self.assertNotIn("은(는)", text)
             self.assertNotIn("대한전선가", text)
             self.assertNotIn("부담는", text)
             self.assertNotIn("기대은", text)
             self.assertNotIn("있습니다를 바탕으로", text)
+
+    def test_kis_universe_wording_is_used(self):
+        morning = generate_morning_brief(self.bundle, "2026-05-08")["report_text"]
+        self.assertIn("KIS 유니버스 기반", morning)
+        self.assertNotIn("국내 전종목 가격 커버리지가 부족해", morning)
 
     def test_regular_and_closing_explain_conservative_reassessment(self):
         regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)

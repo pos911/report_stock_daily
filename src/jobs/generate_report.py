@@ -49,6 +49,35 @@ logger = logging.getLogger(__name__)
 
 VALID_REPORT_TYPES = ("morning", "regular", "closing")
 KST = ZoneInfo("Asia/Seoul")
+FINAL_REPORT_FORBIDDEN_TERMS = (
+    "관련 뉴스",
+    "실적 발표 관련 뉴스",
+    "뉴스",
+    "공시",
+    "수주",
+    "계약",
+    "외국인 투자자",
+    "외국인 선물",
+    "프로그램 매매",
+    "목표가",
+    "매수 추천",
+    "매도 추천",
+    "BUY",
+    "SELL",
+    "HOLD",
+    "전체시장 거래대금 Top",
+    "전체시장 시총 Top",
+    "기술적 반등",
+    "업황 및 경쟁사 동향",
+    "특정 이슈",
+)
+REPORT_TEXT_FIXUPS = {
+    "반도체·조선와": "반도체·조선과",
+    "장기금리 부담는": "장기금리 부담은",
+    "기대은": "기대는",
+    "부담는": "부담은",
+    "있습니다를 바탕으로": "있다는 점을 감안하면",
+}
 
 
 def _parse_args():
@@ -314,6 +343,40 @@ def _generate_gemini_insight(report_type: str, report_date: str, bundle: dict) -
     return generate_closing_analysis_insight(context)
 
 
+def _format_index_with_quality_gate(label: str, value, macro: dict, target_date: str) -> str:
+    warning = detect_market_value_anomaly(
+        label,
+        value,
+        change_rate=macro.get(f"{label.lower()}_change_rate"),
+        as_of_date=macro.get("base_date"),
+        target_date=target_date,
+        data_quality_flag=macro.get("data_quality_flag"),
+        source_consistency_status=macro.get("source_consistency_status"),
+    )
+    if warning:
+        return warning
+    return format_number(value)
+
+
+def _sanitize_final_report_text(report_content: str) -> tuple[str, list[str]]:
+    text = report_content or ""
+    for source, target in REPORT_TEXT_FIXUPS.items():
+        text = text.replace(source, target)
+
+    removed_terms: list[str] = []
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        matched = [term for term in FINAL_REPORT_FORBIDDEN_TERMS if term and term in stripped]
+        if matched:
+            removed_terms.extend(matched)
+            continue
+        cleaned_lines.append(line)
+
+    sanitized = "\n".join(cleaned_lines).rstrip() + "\n"
+    return sanitized, sorted(dict.fromkeys(removed_terms))
+
+
 def _build_simple_non_morning_report(report_type: str, report_date: str, bundle: dict, gemini_insight: dict | None = None) -> str:
     readiness = bundle.get("readiness") or {}
     freshness = bundle.get("freshness") or {}
@@ -339,8 +402,8 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
 
     summary_title = "장중 핵심 요약" if report_type == "regular" else "마감 요약"
     summary_body = [
-        f"- KOSPI: {format_number(macro.get('kospi')) if safe_float(macro.get('kospi')) is not None else '미확인'}",
-        f"- KOSDAQ: {format_number(macro.get('kosdaq')) if safe_float(macro.get('kosdaq')) is not None else '미확인'}",
+        f"- KOSPI: {_format_index_with_quality_gate('KOSPI', macro.get('kospi'), macro, report_date) if safe_float(macro.get('kospi')) is not None else '미확인'}",
+        f"- KOSDAQ: {_format_index_with_quality_gate('KOSDAQ', macro.get('kosdaq'), macro, report_date) if safe_float(macro.get('kosdaq')) is not None else '미확인'}",
         f"- USD/KRW: {format_number(macro.get('usdkrw')) if safe_float(macro.get('usdkrw')) is not None else '미확인'}",
         f"- 한 줄 요약: {_build_session_summary(report_type, macro, rankings, watchlist)}",
     ]
@@ -462,7 +525,7 @@ def _build_non_morning_checkpoints(report_type: str, readiness: dict, macro: dic
             lines[2] = f"- 반드시 확인할 데이터: {', '.join(must_check[:3])}"
         return lines
     checkpoints = [
-        "- 환율과 외국인 선물 방향 확인",
+        "- 환율과 KIS 거래량 상위 유지 여부 확인",
         "- KIS 거래량 상위 지속 여부 확인",
         "- 관심종목 Signal 변화 확인",
     ]
@@ -585,8 +648,42 @@ def _derive_watchlist_signal(row: dict) -> dict:
 
 def _collect_scale_warning(macro: dict, watchlist: list[dict]) -> str:
     warnings = [
-        detect_market_value_anomaly("KOSPI", macro.get("kospi")),
-        detect_market_value_anomaly("KOSDAQ", macro.get("kosdaq")),
+        detect_market_value_anomaly(
+            "S&P500",
+            macro.get("sp500"),
+            change_rate=macro.get("sp500_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
+        detect_market_value_anomaly(
+            "Nasdaq",
+            macro.get("nasdaq"),
+            change_rate=macro.get("nasdaq_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
+        detect_market_value_anomaly(
+            "KOSPI",
+            macro.get("kospi"),
+            change_rate=macro.get("kospi_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
+        detect_market_value_anomaly(
+            "KOSDAQ",
+            macro.get("kosdaq"),
+            change_rate=macro.get("kosdaq_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
     ]
     for row in watchlist[:10]:
         warnings.append(
@@ -675,6 +772,9 @@ def run_report(
         logger.info("Morning snapshot saved: %s", snapshot_path)
     else:
         report_content = _build_simple_non_morning_report(report_type, normalized_report_date, bundle, gemini_insight=gemini_insight)
+
+    report_content, removed_terms = _sanitize_final_report_text(report_content)
+    logger.info("report_sanitize_removed_terms=%s", removed_terms)
 
     _save_report(report_type, report_content, now_kst)
 

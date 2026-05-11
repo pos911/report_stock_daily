@@ -6,6 +6,13 @@ from collections.abc import Iterable
 
 NA_TEXT = "미확인"
 
+INDEX_REASONABLE_RANGES = {
+    "KOSPI": (1_000, 6_500),
+    "KOSDAQ": (300, 1_800),
+    "Nasdaq": (5_000, 35_000),
+    "S&P500": (1_000, 10_000),
+}
+
 
 def is_missing(value) -> bool:
     if value is None:
@@ -168,12 +175,34 @@ def format_sections_list(values: Iterable[str] | None) -> str:
     return ", ".join(cleaned) if cleaned else "없음"
 
 
-def detect_market_value_anomaly(label: str, value: float | int | str | None) -> str | None:
+def detect_market_value_anomaly(
+    label: str,
+    value: float | int | str | None,
+    *,
+    change_rate: float | int | str | None = None,
+    as_of_date: str | None = None,
+    target_date: str | None = None,
+    data_quality_flag: str | None = None,
+    source_consistency_status: str | None = None,
+) -> str | None:
     numeric = safe_float(value)
     if numeric is None:
         return None
+    if str(data_quality_flag or "").upper() == "SOURCE_MIXED":
+        return "지수 원천 확인 필요"
+    if str(source_consistency_status or "").upper().startswith("SOURCE_MIXED"):
+        return "지수 원천 확인 필요"
     if numeric <= 0:
-        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+        return "지수 원천 확인 필요"
+    lower_upper = INDEX_REASONABLE_RANGES.get(label)
+    if lower_upper is not None:
+        lower, upper = lower_upper
+        if numeric < lower or numeric > upper:
+            return "지수 원천 확인 필요"
+    normalized_change_rate = safe_change_rate(change_rate)
+    if as_of_date and target_date and str(as_of_date) < str(target_date):
+        if normalized_change_rate is not None and abs(normalized_change_rate) >= 0.15:
+            return "지수 원천 확인 필요"
     return None
 
 
@@ -191,18 +220,18 @@ def detect_stock_price_anomaly(
     if numeric is None:
         return None
     if str(data_quality_flag or "").upper() == "SOURCE_MIXED":
-        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+        return "일부 관심종목 가격은 원천 확인이 필요합니다."
     if str(source_consistency_status or "").upper().startswith("SOURCE_MIXED"):
-        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+        return "일부 관심종목 가격은 원천 확인이 필요합니다."
     if bool(source_mixed):
-        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+        return "일부 관심종목 가격은 원천 확인이 필요합니다."
     if numeric <= 0:
-        return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+        return "일부 관심종목 가격은 원천 확인이 필요합니다."
     previous_numeric = safe_float(previous_price)
     if previous_numeric not in (None, 0):
         jump_ratio = abs((numeric / previous_numeric) - 1)
         if jump_ratio >= 0.5:
-            return "일부 지수·종목 가격은 원천 스케일 확인이 필요합니다."
+            return "일부 관심종목 가격은 원천 확인이 필요합니다."
     return None
 
 

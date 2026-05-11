@@ -51,7 +51,10 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_yield_spread(0.468, -4.4), "+46.8bp / 전일대비 -4.4bp")
 
     def test_market_anomaly_warning(self):
-        self.assertIsNone(detect_market_value_anomaly("KOSPI", 7498))
+        self.assertEqual(
+            detect_market_value_anomaly("KOSPI", 7822.24, change_rate=0.001, as_of_date="2026-05-11", target_date="2026-05-11"),
+            "지수 원천 확인 필요",
+        )
         self.assertIsNone(detect_market_value_anomaly("KOSPI", 2700))
         self.assertIsNotNone(detect_market_value_anomaly("KOSPI", 0))
 

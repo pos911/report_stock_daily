@@ -26,7 +26,7 @@ class RegularClosingReportSectionTests(unittest.TestCase):
                 "display_mode": "KIS_UNIVERSE_ONLY",
                 "report_allowed_sections": ["macro", "us_market", "kis_volume_top", "watchlist_signal"],
                 "blocked_korean_sections": ["kr_full_market_trading_value_top", "kr_full_market_market_cap_top"],
-                "data_limitation_note": "국내 전종목 가격 커버리지가 부족해 거래대금·시총 기준 전체시장 Top은 생략합니다.",
+                "data_limitation_note": "국내 리포트는 KIS 유니버스 기반으로 운영합니다. 전체시장 거래대금·시총 Top은 사용하지 않고, 관심종목 중심으로 해석합니다.",
             },
             "sector_etfs": [],
         }

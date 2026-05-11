@@ -18,22 +18,36 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.getenv("GEMINI_INTERPRETATION_MODEL", "gemini-2.0-flash")
 FORBIDDEN_TERMS = (
+    "뉴스",
+    "관련 뉴스",
+    "실적 발표 관련 뉴스",
+    "공시",
+    "수주",
+    "계약",
+    "외국인 투자자",
+    "외국인 선물",
+    "프로그램 매매",
+    "목표가",
+    "매수",
+    "매도",
     "BUY",
     "SELL",
     "HOLD",
     "전체시장 거래대금 Top",
     "전체시장 시총 Top",
-    "외국인 선물 순매수",
-    "프로그램 매매",
-    "실시간 뉴스",
-    "공시 발생",
-    "목표가",
     "매수 추천",
     "매도 추천",
     "매수추천",
     "매도추천",
+    "기술적 반등",
+    "업황 및 경쟁사 동향",
+    "특정 이슈",
 )
 NUMBER_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?%?")
+ANCHOR_PATTERN = re.compile(
+    r"(KIS|거래량|거래대금|상승|약화|유지|과열|관찰|확인 제한|리스크|USD/KRW|Nasdaq|SOX|VIX|Brent|WTI|DXY|환율|금리|유가|반도체|2차전지|조선|증권|소재|점수|score|label|라벨|관심종목|ETF)",
+    re.IGNORECASE,
+)
 
 
 class GeminiInterpretationError(RuntimeError):
@@ -106,36 +120,109 @@ def _sentence_has_unknown_number(sentence: str, allowed_numbers: set[str]) -> bo
     return False
 
 
-def _sanitize_text_value(text: str, allowed_numbers: set[str]) -> str:
+def _build_anchor_terms(context: dict[str, Any]) -> set[str]:
+    terms = {
+        "KIS",
+        "거래량",
+        "거래대금",
+        "상승",
+        "유지",
+        "과열",
+        "관찰",
+        "확인 제한",
+        "리스크",
+        "USD/KRW",
+        "Nasdaq",
+        "SOX",
+        "VIX",
+        "Brent",
+        "WTI",
+        "DXY",
+        "점수",
+        "score",
+        "label",
+        "라벨",
+        "관심종목",
+        "ETF",
+    }
+    for section in ("watchlist", "kis_volume_top", "sector_etfs"):
+        for row in context.get(section) or []:
+            for key in ("symbol", "name", "sector_group", "signal_label"):
+                value = str(row.get(key) or "").strip()
+                if value:
+                    terms.add(value)
+    return terms
+
+
+def _anchor_rule_for_path(path: tuple[str, ...]) -> set[str] | None:
+    if not path:
+        return None
+    root = path[0]
+    if root == "view_vs_actual_status":
+        return {"유지", "약화", "확인 제한"}
+    if root == "market_review_status":
+        return {"추세", "단기 이벤트", "혼재", "확인 제한"}
+    if root == "key_drivers":
+        return {"KIS", "거래량", "거래대금", "환율", "금리", "유가", "반도체", "2차전지", "조선", "증권"}
+    if root in {"scenario_summary", "aggressive_view", "conservative_view"}:
+        return {"USD/KRW", "Nasdaq", "SOX", "VIX", "Brent", "WTI", "DXY", "거래대금", "KIS", "ETF", "관심종목"}
+    if root in {"must_watch", "next_checkpoints"}:
+        return {"KIS", "거래량", "거래대금", "USD/KRW", "SOX", "Nasdaq", "ETF", "관심종목", "확인 제한"}
+    if root in {"kis_volume_interpretation"}:
+        return {"KIS", "거래량", "순위", "rank", "거래대금", "유지"}
+    if root in {"watchlist_comments", "watchlist_review"}:
+        return {"거래대금", "상승", "과열", "확인 제한", "KIS", "점수", "score", "label", "라벨", "관찰", "리스크", "유지"}
+    if root in {"view_vs_actual_reason", "market_review_reason"}:
+        return {"KIS", "거래량", "관심종목", "거래대금", "유지", "약화", "확인 제한"}
+    if root in {"aggressive_condition", "conservative_condition", "must_check"}:
+        return {"KIS", "거래량", "거래대금", "USD/KRW", "SOX", "Nasdaq", "ETF", "관심종목"}
+    return None
+
+
+def _has_anchor_term(sentence: str, anchor_terms: set[str], required_terms: set[str] | None = None) -> bool:
+    normalized = sentence.strip()
+    if not normalized:
+        return False
+    if required_terms and not any(term and term in normalized for term in required_terms):
+        return False
+    if any(term and term in normalized for term in anchor_terms):
+        return True
+    return bool(ANCHOR_PATTERN.search(normalized))
+
+
+def _sanitize_text_value(text: str, allowed_numbers: set[str], anchor_terms: set[str], path: tuple[str, ...]) -> str:
     kept: list[str] = []
+    required_terms = _anchor_rule_for_path(path)
     for sentence in _split_sentences(text):
         if _contains_forbidden_term(sentence):
             continue
         if _sentence_has_unknown_number(sentence, allowed_numbers):
             continue
+        if not _has_anchor_term(sentence, anchor_terms, required_terms):
+            continue
         kept.append(sentence)
     return " ".join(kept).strip()
 
 
-def _sanitize_payload(payload: Any, allowed_numbers: set[str]) -> Any:
+def _sanitize_payload(payload: Any, allowed_numbers: set[str], anchor_terms: set[str], path: tuple[str, ...] = ()) -> Any:
     if isinstance(payload, dict):
         cleaned: dict[str, Any] = {}
         for key, value in payload.items():
-            sanitized = _sanitize_payload(value, allowed_numbers)
+            sanitized = _sanitize_payload(value, allowed_numbers, anchor_terms, path + (str(key),))
             if sanitized in ("", None, [], {}):
                 continue
             cleaned[key] = sanitized
         return cleaned
     if isinstance(payload, list):
         cleaned_list = []
-        for value in payload:
-            sanitized = _sanitize_payload(value, allowed_numbers)
+        for index, value in enumerate(payload):
+            sanitized = _sanitize_payload(value, allowed_numbers, anchor_terms, path + (str(index),))
             if sanitized in ("", None, [], {}):
                 continue
             cleaned_list.append(sanitized)
         return cleaned_list
     if isinstance(payload, str):
-        return _sanitize_text_value(payload, allowed_numbers)
+        return _sanitize_text_value(payload, allowed_numbers, anchor_terms, path)
     return payload
 
 
@@ -172,8 +259,11 @@ def _build_prompt(session: str, context: dict[str, Any]) -> str:
         "입력 JSON 외의 사실을 만들지 마라.",
         "숫자, 가격, 등락률, rank, score는 새로 만들지 마라.",
         "KIS 거래량 순위는 전체시장 Top이 아니라 KIS API 기반 후보군이다.",
-        "현재 데이터에 없는 외국인 선물, 프로그램 매매, 실시간 뉴스, 공시를 언급하지 마라.",
+        "현재 데이터에 없는 뉴스, 공시, 수주, 계약, 외국인 투자자 동향, 외국인 선물, 프로그램 매매를 언급하지 마라.",
         "투자 추천이 아니라 관찰 조건과 리스크 기준을 제시하라.",
+        "각 종목별 해석은 반드시 입력 데이터 중 최소 1개와 직접 연결하라.",
+        "거래대금 유지 여부, 상승 지속·과열 부담, 현재 데이터로는 확인 제한, KIS 거래량 상위와의 연결성, score/label 기반 리스크 중 하나는 반드시 포함하라.",
+        "관련 뉴스 참고, 업황 확인, 특정 이슈, 기술적 반등 같은 일반론만 쓰지 마라.",
         "각 종목별로 서로 다른 해석을 작성하라.",
         "같은 문장을 반복하지 마라.",
         "응답은 JSON만 반환하라.",
@@ -209,7 +299,7 @@ class GeminiInterpretationClient:
     def generate(self, session: str, context: dict[str, Any]) -> dict[str, Any]:
         prompt = _build_prompt(session, context)
         parsed = _extract_json_payload(self._call(prompt))
-        sanitized = _sanitize_payload(parsed, _collect_allowed_number_tokens(context))
+        sanitized = _sanitize_payload(parsed, _collect_allowed_number_tokens(context), _build_anchor_terms(context))
         if not sanitized:
             raise GeminiInterpretationError("sanitized Gemini payload empty")
         return sanitized

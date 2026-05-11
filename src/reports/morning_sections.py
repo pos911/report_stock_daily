@@ -152,14 +152,13 @@ def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dic
         f"{lead_sector or '주도 테마'} 중심의 시초가 강세가 이어질 수 있습니다."
     )
     if lead_sector or second_sector:
-        combined_sector = sector_text(lead_sector, second_sector)
         if lead_sector and second_sector:
             attack.append(
-                f"단, {lead_sector}·{second_sector}와 연결된 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
+                f"단, {lead_sector}와 {second_sector} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
             )
         else:
             attack.append(
-                f"단, {combined_sector} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
+                f"단, {lead_sector or second_sector} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
             )
 
     defensive = []
@@ -173,7 +172,7 @@ def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dic
     if freshness.get("xkrx_is_open"):
         opening_checks.extend(
             [
-                "09:30 외국인 선물 방향 확인",
+                "09:30 USD/KRW와 KIS 거래량 상위 유지 여부 확인",
                 "KIS 거래량 상위 유지 여부 확인",
                 f"{watched} 거래대금 유지 여부 확인",
                 "주도 ETF와 대표 종목 동행 여부 확인",
@@ -182,7 +181,7 @@ def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dic
     else:
         opening_checks.extend(
             [
-                "다음 거래일 장초반 외국인 선물 방향 확인",
+                "다음 거래일 장초반 USD/KRW 방향 확인",
                 "KIS 거래량 상위 유지 여부 확인",
                 f"{watched} 거래대금 갱신 여부 확인",
                 "주도 ETF와 대표 종목 동행 여부 확인",
@@ -271,7 +270,7 @@ def build_watchlist_section(watchlist_scores: list[dict], freshness: dict) -> li
 def build_risk_section(regime: dict, top_sectors: list[dict], watchlist_scores: list[dict], freshness: dict, readiness: dict) -> list[str]:
     risks: list[str] = []
     if readiness.get("display_mode") != "FULL_MARKET":
-        risks.append("[데이터] 국내 전종목 가격 커버리지가 충분하지 않습니다.")
+        risks.append("[데이터] 국내 리포트는 KIS 유니버스 기준으로 해석합니다.")
     if freshness.get("stale_warnings"):
         risks.append(f"[데이터] {_translate_stale_warning(freshness.get('stale_warnings'))}.")
     for warning in regime.get("warnings") or []:
@@ -304,7 +303,7 @@ def build_checkpoints_section(top_sectors: list[dict], freshness: dict, readines
         return lines
 
     base_points = [
-        "09:30 외국인 선물 방향",
+        "09:30 USD/KRW와 KIS 거래량 상위 확인",
         "10:30 주도 테마 거래대금 유지 여부",
         "12:30 KIS 거래량 상위 종목 지속 여부",
     ]
@@ -323,8 +322,42 @@ def build_checkpoints_section(top_sectors: list[dict], freshness: dict, readines
 
 def collect_scale_warnings(macro: dict, watchlist_rows: list[dict]) -> list[str]:
     warnings = [
-        detect_market_value_anomaly("KOSPI", macro.get("kospi")),
-        detect_market_value_anomaly("KOSDAQ", macro.get("kosdaq")),
+        detect_market_value_anomaly(
+            "S&P500",
+            macro.get("sp500"),
+            change_rate=macro.get("sp500_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
+        detect_market_value_anomaly(
+            "Nasdaq",
+            macro.get("nasdaq"),
+            change_rate=macro.get("nasdaq_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
+        detect_market_value_anomaly(
+            "KOSPI",
+            macro.get("kospi"),
+            change_rate=macro.get("kospi_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
+        detect_market_value_anomaly(
+            "KOSDAQ",
+            macro.get("kosdaq"),
+            change_rate=macro.get("kosdaq_change_rate"),
+            as_of_date=macro.get("base_date"),
+            target_date=macro.get("target_date") or macro.get("base_date"),
+            data_quality_flag=macro.get("data_quality_flag"),
+            source_consistency_status=macro.get("source_consistency_status"),
+        ),
     ]
     for row in watchlist_rows[:10]:
         warnings.append(
@@ -570,7 +603,7 @@ def _checkpoint_text(items: Iterable[str], freshness: dict) -> str:
         return "휴장으로 실시간 대응 없음 / 다음 거래일 확인: 관심종목과 ETF 흐름 점검"
     cleaned = [str(item).strip() for item in items if str(item).strip()]
     if not cleaned:
-        return "09:30 외국인 선물 방향과 거래대금 유지 여부 확인"
+        return "09:30 USD/KRW와 거래대금 유지 여부 확인"
     return ", ".join(dict.fromkeys(cleaned))
 
 

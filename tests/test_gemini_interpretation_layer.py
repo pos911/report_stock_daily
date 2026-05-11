@@ -3,8 +3,8 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-from src.analysis.gemini_interpretation import _sanitize_payload
-from src.jobs.generate_report import _build_simple_non_morning_report, _resolve_use_gemini, run_report
+from src.analysis.gemini_interpretation import _build_anchor_terms, _sanitize_payload
+from src.jobs.generate_report import _build_simple_non_morning_report, _resolve_use_gemini, _sanitize_final_report_text, run_report
 from src.reports.morning_report import generate_morning_brief
 
 
@@ -65,7 +65,7 @@ def _bundle():
             "report_blocked_sections": ["kr_full_market_trading_value_top", "kr_full_market_market_cap_top"],
             "allowed_korean_sections": ["kis_volume_top", "watchlist_signal", "etf_etn"],
             "blocked_korean_sections": ["kr_full_market_trading_value_top", "kr_full_market_market_cap_top"],
-            "data_limitation_note": "국내 종목은 KIS ranking·관심종목 후보군 중심으로 제한 제공합니다.",
+            "data_limitation_note": "국내 리포트는 KIS 유니버스 기반으로 운영합니다. 전체시장 거래대금·시총 Top은 사용하지 않고, KIS 거래량 후보와 관심종목 중심으로 해석합니다.",
             "kr_full_market_price_ready": False,
             "kis_volume_ranking_ready": True,
             "kis_universe_ready": True,
@@ -137,10 +137,18 @@ class GeminiInterpretationLayerTests(unittest.TestCase):
             "scenario_summary": "BUY 관점입니다. 999.99% 급등을 기대합니다. 반도체 거래대금 유지 여부를 확인합니다.",
             "must_watch": ["외국인 선물 순매수 확인", "USD/KRW 방향 확인"],
         }
-        cleaned = _sanitize_payload(payload, {"80.0", "1448.0", "468", "0.468"})
+        cleaned = _sanitize_payload(payload, {"80.0", "1448.0", "468", "0.468"}, _build_anchor_terms(_bundle()))
         self.assertNotIn("BUY", str(cleaned))
         self.assertNotIn("외국인 선물 순매수", str(cleaned))
         self.assertNotIn("999.99%", str(cleaned))
+        self.assertIn("USD/KRW 방향 확인", str(cleaned))
+
+    def test_final_report_sanitize_removes_forbidden_gemini_lines(self):
+        report_text = "[Regular Brief | 2026-05-11]\n- Gemini 해석: 관련 뉴스를 참고하십시오.\n- 정상 문장: KIS 거래량 유지 여부를 확인합니다.\n"
+        sanitized, removed_terms = _sanitize_final_report_text(report_text)
+        self.assertNotIn("관련 뉴스", sanitized)
+        self.assertIn("KIS 거래량 유지 여부", sanitized)
+        self.assertIn("관련 뉴스", removed_terms)
 
     @patch("src.jobs.generate_report._save_report")
     @patch("src.jobs.generate_report.generate_morning_brief")
