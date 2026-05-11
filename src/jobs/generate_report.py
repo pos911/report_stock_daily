@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import logging
+import os
 import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,10 +13,18 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent
 sys.path.append(str(project_root))
 
+from src.analysis.gemini_interpretation import (
+    DEFAULT_MODEL as GEMINI_INTERPRETATION_MODEL,
+    GeminiInterpretationError,
+    generate_closing_analysis_insight,
+    generate_morning_analysis_insight,
+    generate_regular_analysis_insight,
+)
 from src.data.supabase_reader import SupabaseReader
 from src.notification.telegram_sender import TelegramSender
 from src.reports.morning_report import generate_morning_brief, save_morning_snapshot
 from src.services.supabase_stockdata_reader import SupabaseStockDataReader
+from src.utils.config_loader import config
 from src.utils.formatters import (
     NA_TEXT,
     add_section,
@@ -48,6 +57,8 @@ def _parse_args():
     parser.add_argument("--date", dest="report_date", help="Report date in YYYYMMDD or YYYY-MM-DD (KST basis).")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-send", action="store_true")
+    parser.add_argument("--use-gemini", dest="use_gemini", action="store_const", const=True, default=None)
+    parser.add_argument("--no-gemini", dest="use_gemini", action="store_const", const=False)
     parser.add_argument("--notify-on-skip", dest="notify_on_skip", action="store_true", default=True)
     parser.add_argument("--no-notify-on-skip", dest="notify_on_skip", action="store_false")
     args = parser.parse_args()
@@ -69,6 +80,19 @@ def _normalize_report_date(report_date: str | None, now_kst: datetime.datetime) 
     if len(text) == 8 and text.isdigit():
         return datetime.datetime.strptime(text, "%Y%m%d").date().isoformat()
     return datetime.date.fromisoformat(text).isoformat()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_use_gemini(cli_value: bool | None) -> bool:
+    if cli_value is not None:
+        return bool(cli_value)
+    return _env_flag("REPORT_USE_GEMINI", default=False)
 
 
 def _should_skip_all_markets(calendar_status: dict) -> bool:
@@ -214,7 +238,83 @@ def _save_report(report_type: str, report_content: str, now_kst: datetime.dateti
     return file_path
 
 
-def _build_simple_non_morning_report(report_type: str, report_date: str, bundle: dict) -> str:
+def _build_gemini_context(report_type: str, report_date: str, bundle: dict) -> dict:
+    readiness = bundle.get("readiness") or {}
+    rankings = bundle.get("rankings") or []
+    watchlist = bundle.get("watchlist") or []
+    sector_etfs = bundle.get("sector_etfs") or []
+    macro = bundle.get("macro") or {}
+    return {
+        "report_date": report_date,
+        "session": report_type,
+        "readiness": {
+            "display_mode": readiness.get("display_mode"),
+            "allowed_sections": readiness.get("report_allowed_sections") or [],
+            "blocked_sections": readiness.get("report_blocked_sections") or [],
+            "data_limitation_note": readiness.get("data_limitation_note"),
+        },
+        "macro": {
+            "kospi": macro.get("kospi"),
+            "kosdaq": macro.get("kosdaq"),
+            "usdkrw": macro.get("usdkrw"),
+            "dxy": macro.get("dxy"),
+            "us10y": macro.get("us10y"),
+            "us3y": macro.get("us3y"),
+            "us10y_us3y_spread_bp": safe_float(macro.get("us10y_us3y_spread")) * 100 if safe_float(macro.get("us10y_us3y_spread")) is not None else None,
+            "nasdaq": macro.get("nasdaq"),
+            "sox": macro.get("sox"),
+            "vix": macro.get("vix"),
+            "brent": macro.get("brent"),
+            "wti": macro.get("wti"),
+        },
+        "kis_volume_top": [
+            {
+                "symbol": row.get("symbol"),
+                "name": row.get("name"),
+                "market": row.get("market"),
+                "rank": row.get("rank"),
+                "volume": row.get("volume"),
+            }
+            for row in rankings
+            if row.get("rank_type") == "volume" and row.get("source") == "KIS"
+        ][:5],
+        "watchlist": [
+            {
+                "symbol": row.get("symbol"),
+                "name": row.get("name"),
+                "close_price": row.get("close_price"),
+                "change_rate_1d": row.get("change_rate_1d"),
+                "signal_label": row.get("signal_label") or row.get("label"),
+                "signal_score": row.get("signal_score") or row.get("score"),
+                "sector_group": row.get("sector_group"),
+                "source_mixed": row.get("source_mixed"),
+                "data_status": row.get("data_status"),
+            }
+            for row in watchlist[:7]
+        ],
+        "sector_etfs": [
+            {
+                "symbol": row.get("symbol"),
+                "name": row.get("name"),
+                "sector_group": row.get("sector_group"),
+                "change_rate_1d": row.get("change_rate_1d"),
+                "data_status": row.get("data_status"),
+            }
+            for row in sector_etfs[:10]
+        ],
+    }
+
+
+def _generate_gemini_insight(report_type: str, report_date: str, bundle: dict) -> dict:
+    context = _build_gemini_context(report_type, report_date, bundle)
+    if report_type == "morning":
+        return generate_morning_analysis_insight(context)
+    if report_type == "regular":
+        return generate_regular_analysis_insight(context)
+    return generate_closing_analysis_insight(context)
+
+
+def _build_simple_non_morning_report(report_type: str, report_date: str, bundle: dict, gemini_insight: dict | None = None) -> str:
     readiness = bundle.get("readiness") or {}
     freshness = bundle.get("freshness") or {}
     macro = bundle.get("macro") or {}
@@ -247,9 +347,9 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     section_no = add_section(lines, section_no, summary_title, summary_body)
 
     if report_type == "regular":
-        section_no = add_section(lines, section_no, "오전 View 점검", _build_regular_view_check_section(bundle))
+        section_no = add_section(lines, section_no, "오전 View 점검", _build_regular_view_check_section(bundle, gemini_insight))
     else:
-        section_no = add_section(lines, section_no, "오늘의 핵심 키워드", _build_closing_key_message_section(bundle))
+        section_no = add_section(lines, section_no, "오늘의 핵심 키워드", _build_closing_key_message_section(bundle, gemini_insight))
 
     limitation_body = []
     if readiness.get("display_mode") != "FULL_MARKET":
@@ -267,11 +367,15 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
             f"- {row.get('name') or row.get('symbol')}({row.get('symbol')}), {row.get('market')}, rank {row.get('rank')}, 거래량 {format_number(row.get('volume'), 0)}"
             for row in volume_rows
         ]
+        for insight_line in [str(item).strip() for item in (gemini_insight or {}).get("kis_volume_interpretation", []) if str(item).strip()]:
+            volume_body.append(f"- 해석: {insight_line}")
         volume_title = "KIS 거래량 순위 기준" if report_type == "regular" else "KIS 거래량 순위 기준 마감 점검"
         section_no = add_section(lines, section_no, volume_title, volume_body)
 
     if "watchlist_signal" in (readiness.get("report_allowed_sections") or []):
         signal_body = ["- 장중/마감 Signal은 현재 price/signal 기준의 보수적 재평가입니다."]
+        watchlist_comments = (gemini_insight or {}).get("watchlist_comments") or {}
+        watchlist_review = (gemini_insight or {}).get("watchlist_review") or {}
         for row in watchlist[:5]:
             derived = _derive_watchlist_signal(row)
             parts = [f"- {row.get('name') or row.get('symbol')}({row.get('symbol')})"]
@@ -289,6 +393,10 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
             if score_value is not None:
                 parts.append(f"score {safe_float(score_value):.1f}")
             signal_body.append(" | ".join(parts))
+            symbol = row.get("symbol")
+            comment = str(watchlist_comments.get(symbol) or watchlist_review.get(symbol) or "").strip()
+            if comment:
+                signal_body.append(f"  해석: {comment}")
         title_text = "관심종목 장중 반응" if report_type == "regular" else "관심종목 마감 진단"
         section_no = add_section(lines, section_no, title_text, signal_body)
 
@@ -309,7 +417,7 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
         section_no = add_section(lines, section_no, "전체시장 시총 Top", mc_body)
 
     checkpoint_title = "오후 체크포인트" if report_type == "regular" else "내일의 전략"
-    checkpoint_body = _build_non_morning_checkpoints(report_type, readiness, macro, rankings, watchlist)
+    checkpoint_body = _build_non_morning_checkpoints(report_type, readiness, macro, rankings, watchlist, gemini_insight)
     section_no = add_section(lines, section_no, checkpoint_title, checkpoint_body)
 
     return "\n".join(lines).strip() + "\n"
@@ -336,25 +444,36 @@ def _build_session_summary(report_type: str, macro: dict, rankings: list[dict], 
     return "오늘은 KIS 거래량 상위와 관심종목 후보군 중심으로만 마감 복기를 제공합니다."
 
 
-def _build_non_morning_checkpoints(report_type: str, readiness: dict, macro: dict, rankings: list[dict], watchlist: list[dict]) -> list[str]:
+def _build_non_morning_checkpoints(report_type: str, readiness: dict, macro: dict, rankings: list[dict], watchlist: list[dict], gemini_insight: dict | None = None) -> list[str]:
     if report_type == "closing":
         top_volume = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:2]
-        return [
+        lines = [
             f"- 공격적 조건: {'·'.join(top_volume) if top_volume else 'KIS 거래량 상위'}이 다음 거래일에도 거래량 상위를 유지하고, 관심종목 거래대금이 동반 확대되는지 확인",
             "- 보수적 조건: 환율과 금리가 다시 상승하면 추격보다 눌림 확인을 우선",
             "- 반드시 확인할 데이터: 미국장 반도체 흐름, USD/KRW, KIS 거래량 상위 지속 여부",
         ]
+        strategy = (gemini_insight or {}).get("tomorrow_strategy") or {}
+        if str(strategy.get("aggressive_condition") or "").strip():
+            lines[0] = f"- 공격적 조건: {str(strategy.get('aggressive_condition')).strip()}"
+        if str(strategy.get("conservative_condition") or "").strip():
+            lines[1] = f"- 보수적 조건: {str(strategy.get('conservative_condition')).strip()}"
+        must_check = [str(item).strip() for item in (strategy.get("must_check") or []) if str(item).strip()]
+        if must_check:
+            lines[2] = f"- 반드시 확인할 데이터: {', '.join(must_check[:3])}"
+        return lines
     checkpoints = [
         "- 환율과 외국인 선물 방향 확인",
         "- KIS 거래량 상위 지속 여부 확인",
         "- 관심종목 Signal 변화 확인",
     ]
+    extra = [str(item).strip() for item in ((gemini_insight or {}).get("next_checkpoints") or []) if str(item).strip()]
+    checkpoints.extend(f"- {item}" for item in extra[:2])
     if readiness.get("display_mode") != "FULL_MARKET":
         checkpoints.append("- 전체시장 Top 대신 관심종목·랭킹 후보 반응에 집중")
     return checkpoints[:4]
 
 
-def _build_regular_view_check_section(bundle: dict) -> list[str]:
+def _build_regular_view_check_section(bundle: dict, gemini_insight: dict | None = None) -> list[str]:
     sector_etfs = bundle.get("sector_etfs") or []
     watchlist = bundle.get("watchlist") or []
     rankings = bundle.get("rankings") or []
@@ -378,10 +497,16 @@ def _build_regular_view_check_section(bundle: dict) -> list[str]:
     if mixed_or_stale:
         names = "·".join((row.get("name") or row.get("symbol")) for row in mixed_or_stale[:2])
         lines.append(f"- 확인 필요: {names}는 원천 혼합 또는 기준일 차이로 보수적 해석이 필요합니다.")
+    status = str((gemini_insight or {}).get("view_vs_actual_status") or "").strip()
+    reason = str((gemini_insight or {}).get("view_vs_actual_reason") or "").strip()
+    if status:
+        lines.append(f"- Gemini 해석: 오전 View 대비 현재 판단은 {status}입니다.")
+    if reason:
+        lines.append(f"- 추가 해석: {reason}")
     return lines
 
 
-def _build_closing_key_message_section(bundle: dict) -> list[str]:
+def _build_closing_key_message_section(bundle: dict, gemini_insight: dict | None = None) -> list[str]:
     macro = bundle.get("macro") or {}
     rankings = bundle.get("rankings") or []
     watchlist = bundle.get("watchlist") or []
@@ -403,6 +528,12 @@ def _build_closing_key_message_section(bundle: dict) -> list[str]:
         lines.append(f"- 오늘의 핵심 키워드: {' / '.join(keywords[:3])}")
     if strong:
         lines.append(f"- 관심종목 후보군은 {'·'.join(strong[:2])} 중심으로 상대 강도가 확인됐습니다.")
+    for driver in [str(item).strip() for item in (gemini_insight or {}).get("key_drivers", []) if str(item).strip()]:
+        lines.append(f"- Gemini 키워드: {driver}")
+    review_status = str((gemini_insight or {}).get("market_review_status") or "").strip()
+    review_reason = str((gemini_insight or {}).get("market_review_reason") or "").strip()
+    if review_status and review_reason:
+        lines.append(f"- 마감 해석: {review_status} / {review_reason}")
     if not lines:
         lines.append("- 현재 데이터로는 KIS 거래량 상위와 관심종목 후보군 중심 복기만 제공합니다.")
     return lines
@@ -487,15 +618,21 @@ def run_report(
     report_date: str | None = None,
     send_enabled: bool = True,
     notify_on_skip: bool = True,
+    use_gemini: bool = False,
 ):
     base_reader = SupabaseReader()
     reader = SupabaseStockDataReader(base_reader=base_reader)
     normalized_report_date = _normalize_report_date(report_date, now_kst)
     calendar_status = base_reader.fetch_market_calendar_status(normalized_report_date)
+    gemini_api_key_present = bool(config.get("api_key", section="gemini") or os.getenv("GEMINI_API_KEY"))
     logger.info("calendar_status=%s", calendar_status)
     telegram_token = getattr(base_reader, "telegram_bot_token", None)
     telegram_chat_id = getattr(base_reader, "telegram_chat_id", None)
     logger.info("telegram_config_present=%s", str(bool(telegram_token and telegram_chat_id)).lower())
+    logger.info("report_type=%s report_date=%s", report_type, normalized_report_date)
+    logger.info("gemini_interpretation_enabled=%s", str(use_gemini).lower())
+    logger.info("gemini_api_key_present=%s", str(gemini_api_key_present).lower())
+    logger.info("gemini_model=%s", GEMINI_INTERPRETATION_MODEL)
 
     if _should_skip_all_markets(calendar_status):
         skip_text = _build_market_closed_skip_text(report_type, normalized_report_date, calendar_status)
@@ -516,15 +653,28 @@ def run_report(
 
     bundle = reader.get_report_contract_bundle(report_type=report_type, target_date=normalized_report_date)
     logger.info("stockdata_readiness=%s", bundle.get("readiness") or {})
-    logger.info("Gemini content generation=disabled (rule-based report assembly)")
+    gemini_mode = "rule_based"
+    gemini_insight: dict = {}
+    if use_gemini:
+        if not gemini_api_key_present:
+            gemini_mode = "fallback_rule_based"
+            logger.warning("Gemini requested but API key is missing; falling back to rule-based report assembly.")
+        else:
+            try:
+                gemini_insight = _generate_gemini_insight(report_type, normalized_report_date, bundle)
+                gemini_mode = "gemini"
+            except Exception as exc:
+                gemini_mode = "fallback_rule_based"
+                logger.warning("Gemini interpretation failed; falling back to rule-based report assembly. error=%s", exc)
+    logger.info("gemini_mode=%s", gemini_mode)
 
     if report_type == "morning":
-        result = generate_morning_brief(bundle, normalized_report_date)
+        result = generate_morning_brief(bundle, normalized_report_date, gemini_insight=gemini_insight)
         report_content = result["report_text"]
         snapshot_path = save_morning_snapshot(project_root, normalized_report_date, result["snapshot"])
         logger.info("Morning snapshot saved: %s", snapshot_path)
     else:
-        report_content = _build_simple_non_morning_report(report_type, normalized_report_date, bundle)
+        report_content = _build_simple_non_morning_report(report_type, normalized_report_date, bundle, gemini_insight=gemini_insight)
 
     _save_report(report_type, report_content, now_kst)
 
@@ -543,11 +693,13 @@ def main():
     args = _parse_args()
     now_kst = _get_now_kst()
     send_enabled = not (args.dry_run or args.no_send)
+    use_gemini = _resolve_use_gemini(args.use_gemini)
     logger.info(
-        "=== Daily Report Pipeline start [type=%s dry_run=%s notify_on_skip=%s] ===",
+        "=== Daily Report Pipeline start [type=%s dry_run=%s notify_on_skip=%s use_gemini=%s] ===",
         args.report_type,
         not send_enabled,
         args.notify_on_skip,
+        use_gemini,
     )
     run_report(
         args.report_type,
@@ -555,6 +707,7 @@ def main():
         report_date=args.report_date,
         send_enabled=send_enabled,
         notify_on_skip=args.notify_on_skip,
+        use_gemini=use_gemini,
     )
 
 

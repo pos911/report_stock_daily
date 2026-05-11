@@ -19,6 +19,18 @@ on:
         description: "Send Telegram message even when both markets are closed"
         required: false
         default: "true"
+      use_gemini:
+        description: "Use Gemini interpretation layer"
+        required: false
+        default: "false"
+      no_send:
+        description: "Generate report without Telegram send"
+        required: false
+        default: "false"
+      dry_run:
+        description: "Run report in dry-run mode"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -104,8 +116,14 @@ jobs:
           INPUT_TYPE="${{ github.event.inputs.report_type || 'auto' }}"
           INPUT_DATE="${{ github.event.inputs.report_date || '' }}"
           INPUT_NOTIFY="${{ github.event.inputs.notify_on_skip || 'true' }}"
+          INPUT_USE_GEMINI="${{ github.event.inputs.use_gemini || 'false' }}"
+          INPUT_NO_SEND="${{ github.event.inputs.no_send || 'false' }}"
+          INPUT_DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
 
           REPORT_TYPE="regular"
+          USE_GEMINI="false"
+          NO_SEND="$INPUT_NO_SEND"
+          DRY_RUN="$INPUT_DRY_RUN"
           if [[ "$EVENT_NAME" == "workflow_dispatch" && "$INPUT_TYPE" != "" && "$INPUT_TYPE" != "auto" ]]; then
             REPORT_TYPE="$INPUT_TYPE"
           elif [[ "$SCHEDULE" == "0 22 * * 0-4" ]]; then
@@ -116,9 +134,16 @@ jobs:
             REPORT_TYPE="regular"
           fi
 
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            USE_GEMINI="$INPUT_USE_GEMINI"
+          fi
+
           echo "report_type=$REPORT_TYPE" >> "$GITHUB_OUTPUT"
           echo "report_date=$INPUT_DATE" >> "$GITHUB_OUTPUT"
           echo "notify_on_skip=$INPUT_NOTIFY" >> "$GITHUB_OUTPUT"
+          echo "use_gemini=$USE_GEMINI" >> "$GITHUB_OUTPUT"
+          echo "no_send=$NO_SEND" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
 
       - name: Run report
         shell: bash
@@ -133,6 +158,23 @@ jobs:
           else
             CMD+=(--no-notify-on-skip)
           fi
+          if [[ "${{ steps.resolve.outputs.use_gemini }}" == "true" ]]; then
+            CMD+=(--use-gemini)
+          else
+            CMD+=(--no-gemini)
+          fi
+          if [[ "${{ steps.resolve.outputs.no_send }}" == "true" ]]; then
+            CMD+=(--no-send)
+          fi
+          if [[ "${{ steps.resolve.outputs.dry_run }}" == "true" ]]; then
+            CMD+=(--dry-run)
+          fi
+          echo "resolved report_type=${{ steps.resolve.outputs.report_type }}"
+          echo "resolved report_date=${{ steps.resolve.outputs.report_date }}"
+          echo "resolved use_gemini=${{ steps.resolve.outputs.use_gemini }}"
+          echo "resolved no_send=${{ steps.resolve.outputs.no_send }}"
+          echo "resolved dry_run=${{ steps.resolve.outputs.dry_run }}"
+          echo "running: ${CMD[*]}"
           "${CMD[@]}"
 
       - name: Cleanup runtime secrets

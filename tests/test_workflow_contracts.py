@@ -25,6 +25,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("report_type", content)
         self.assertIn("report_date", content)
         self.assertIn("notify_on_skip", content)
+        self.assertIn("use_gemini", content)
+        self.assertIn("no_send", content)
+        self.assertIn("dry_run", content)
 
     def test_daily_report_has_expected_schedules(self):
         content = self._read("daily_report.yml")
@@ -59,6 +62,22 @@ class WorkflowContractTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8")
             self.assertNotIn("echo $KIS_APP_SECRET", content)
             self.assertNotIn("set -x", content)
+
+    def test_daily_report_passes_runtime_flags(self):
+        content = self._read("daily_report.yml")
+        self.assertIn("--use-gemini", content)
+        self.assertIn("--no-gemini", content)
+        self.assertIn("--no-send", content)
+        self.assertIn("--dry-run", content)
+
+    def test_daily_report_defaults_schedule_to_no_gemini(self):
+        content = self._read("daily_report.yml")
+        self.assertIn('USE_GEMINI="false"', content)
+
+    def test_generate_report_supports_gemini_flags(self):
+        report_script = (PROJECT_ROOT / "src" / "jobs" / "generate_report.py").read_text(encoding="utf-8")
+        self.assertIn("--use-gemini", report_script)
+        self.assertIn("--no-gemini", report_script)
 
 
 if __name__ == "__main__":

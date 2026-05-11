@@ -21,7 +21,30 @@ from src.signals.watchlist_morning import build_watchlist_morning_scores
 from src.utils.formatters import add_section
 
 
-def generate_morning_brief(bundle: dict, report_date: str) -> dict:
+def _merge_gemini_scenario(base_lines: list[str], gemini_insight: dict | None) -> list[str]:
+    if not gemini_insight:
+        return base_lines
+    merged = list(base_lines)
+    scenario_summary = str(gemini_insight.get("scenario_summary") or "").strip()
+    aggressive_view = str(gemini_insight.get("aggressive_view") or "").strip()
+    conservative_view = str(gemini_insight.get("conservative_view") or "").strip()
+    must_watch = [str(item).strip() for item in (gemini_insight.get("must_watch") or []) if str(item).strip()]
+    if scenario_summary:
+        merged.insert(0, f"- {scenario_summary}")
+    if aggressive_view or conservative_view:
+        merged.append("")
+        merged.append("Gemini 보강 해석")
+    if aggressive_view:
+        merged.append(f"- 공격적 관점: {aggressive_view}")
+    if conservative_view:
+        merged.append(f"- 보수적 관점: {conservative_view}")
+    if must_watch:
+        merged.append("- 추가 확인 조건:")
+        merged.extend(f"- {item}" for item in must_watch[:3])
+    return merged
+
+
+def generate_morning_brief(bundle: dict, report_date: str, gemini_insight: dict | None = None) -> dict:
     freshness = bundle.get("freshness") or {}
     macro = bundle.get("macro") or {}
     sector_etfs = bundle.get("sector_etfs") or []
@@ -41,7 +64,8 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     section_no = 1
     section_no = add_section(lines, section_no, "데이터 상태", build_data_status_section(freshness, readiness, contract_failed_views, scale_warnings))
     section_no = add_section(lines, section_no, "오늘의 한 줄 판단", build_one_line_judgment_section(regime, top_sectors, freshness, readiness))
-    section_no = add_section(lines, section_no, "오늘의 시나리오", build_scenario_section(regime, top_sectors, freshness, readiness, rankings, watchlist_scores))
+    scenario_body = build_scenario_section(regime, top_sectors, freshness, readiness, rankings, watchlist_scores)
+    section_no = add_section(lines, section_no, "오늘의 시나리오", _merge_gemini_scenario(scenario_body, gemini_insight))
     section_no = add_section(lines, section_no, "야간 글로벌 시장", build_global_market_section(macro))
     section_no = add_section(lines, section_no, "한국장 예상 영향", build_korean_impact_section(top_sectors, freshness, readiness))
     section_no = add_section(lines, section_no, "오늘 우선 관찰 테마", build_priority_themes_section(top_sectors, freshness, readiness))
@@ -52,7 +76,6 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
     section_no = add_section(lines, section_no, checkpoint_title, build_checkpoints_section(top_sectors, freshness, readiness))
 
     report_text = "\n".join(lines).strip() + "\n"
-
     snapshot = {
         "report_date": report_date,
         "regime_label": regime.get("regime_label"),
@@ -76,6 +99,7 @@ def generate_morning_brief(bundle: dict, report_date: str) -> dict:
         "kis_universe_ready": readiness.get("kis_universe_ready"),
         "display_mode": readiness.get("display_mode"),
         "data_limitation_note": readiness.get("data_limitation_note"),
+        "gemini_insight": gemini_insight or {},
     }
     return {"report_text": report_text, "snapshot": snapshot}
 
