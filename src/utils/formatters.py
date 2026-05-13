@@ -7,9 +7,9 @@ from collections.abc import Iterable
 NA_TEXT = "미확인"
 
 INDEX_REASONABLE_RANGES = {
-    "KOSPI": (1_000, 6_500),
+    "KOSPI": (1_000, 10_000),
     "KOSDAQ": (300, 1_800),
-    "Nasdaq": (5_000, 35_000),
+    "Nasdaq": (5_000, 40_000),
     "S&P500": (1_000, 10_000),
 }
 
@@ -54,6 +54,13 @@ def format_number(value, digits: int = 2) -> str:
     if numeric is None:
         return NA_TEXT
     return f"{numeric:,.{digits}f}".rstrip("0").rstrip(".")
+
+
+def format_integer(value) -> str:
+    numeric = safe_float(str(value).replace(",", "") if isinstance(value, str) else value)
+    if numeric is None:
+        return NA_TEXT
+    return format(int(round(numeric)), ",")
 
 
 def format_plain_number(value, digits: int = 2) -> str:
@@ -104,6 +111,14 @@ def format_yield_spread(value, change_bp=None) -> str:
 def format_usdkrw(value) -> str:
     numeric = safe_float(value)
     return NA_TEXT if numeric is None else f"1달러 = {numeric:,.2f}원"
+
+
+def format_krw_range(value) -> str:
+    numeric = safe_float(value)
+    if numeric is None:
+        return NA_TEXT
+    bucket = int(numeric // 10) * 10
+    return f"{bucket:,.0f}원대"
 
 
 def format_volume(value) -> str:
@@ -184,13 +199,20 @@ def detect_market_value_anomaly(
     target_date: str | None = None,
     data_quality_flag: str | None = None,
     source_consistency_status: str | None = None,
+    source: str | None = None,
+    source_symbol: str | None = None,
 ) -> str | None:
     numeric = safe_float(value)
     if numeric is None:
         return None
-    if str(data_quality_flag or "").upper() == "SOURCE_MIXED":
+    quality_flag = str(data_quality_flag or "").upper()
+    consistency_status = str(source_consistency_status or "").upper()
+    source_name = str(source or "").upper()
+    symbol_hint = str(source_symbol or "").strip()
+
+    if quality_flag in {"INVALID", "MISSING", "STALE", "SOURCE_MIXED"}:
         return "지수 원천 확인 필요"
-    if str(source_consistency_status or "").upper().startswith("SOURCE_MIXED"):
+    if consistency_status.startswith("SOURCE_MIXED"):
         return "지수 원천 확인 필요"
     if numeric <= 0:
         return "지수 원천 확인 필요"
@@ -198,11 +220,16 @@ def detect_market_value_anomaly(
     if lower_upper is not None:
         lower, upper = lower_upper
         if numeric < lower or numeric > upper:
+            if label == "KOSPI" and source_name == "KIS" and symbol_hint == "0001" and quality_flag == "OK":
+                return None
+            if label == "KOSDAQ" and source_name == "KIS" and symbol_hint == "1001" and quality_flag == "OK":
+                return None
             return "지수 원천 확인 필요"
     normalized_change_rate = safe_change_rate(change_rate)
-    if as_of_date and target_date and str(as_of_date) < str(target_date):
-        if normalized_change_rate is not None and abs(normalized_change_rate) >= 0.15:
-            return "지수 원천 확인 필요"
+    if normalized_change_rate is not None and abs(normalized_change_rate) >= 0.15:
+        return "지수 원천 확인 필요"
+    if as_of_date and target_date and str(as_of_date) < str(target_date) and quality_flag in {"ANOMALY", "SOURCE_MISMATCH"}:
+        return "지수 원천 확인 필요"
     return None
 
 

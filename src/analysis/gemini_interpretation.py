@@ -42,6 +42,12 @@ FORBIDDEN_TERMS = (
     "기술적 반등",
     "업황 및 경쟁사 동향",
     "특정 이슈",
+    "단기 전략",
+    "시세 차익",
+    "연관성",
+    "연관성을 확인",
+    "연관성을 확인해 볼 필요",
+    "변동 요인",
 )
 NUMBER_PATTERN = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?%?")
 ANCHOR_PATTERN = re.compile(
@@ -165,7 +171,7 @@ def _anchor_rule_for_path(path: tuple[str, ...]) -> set[str] | None:
     if root == "key_drivers":
         return {"KIS", "거래량", "거래대금", "환율", "금리", "유가", "반도체", "2차전지", "조선", "증권"}
     if root in {"scenario_summary", "aggressive_view", "conservative_view"}:
-        return {"USD/KRW", "Nasdaq", "SOX", "VIX", "Brent", "WTI", "DXY", "거래대금", "KIS", "ETF", "관심종목"}
+        return {"USD/KRW", "Nasdaq", "SOX", "VIX", "Brent", "WTI", "DXY", "거래대금", "ETF", "관심종목", "환율", "금리", "유가"}
     if root in {"must_watch", "next_checkpoints"}:
         return {"KIS", "거래량", "거래대금", "USD/KRW", "SOX", "Nasdaq", "ETF", "관심종목", "확인 제한"}
     if root in {"kis_volume_interpretation"}:
@@ -193,9 +199,13 @@ def _has_anchor_term(sentence: str, anchor_terms: set[str], required_terms: set[
 def _sanitize_text_value(text: str, allowed_numbers: set[str], anchor_terms: set[str], path: tuple[str, ...]) -> str:
     kept: list[str] = []
     required_terms = _anchor_rule_for_path(path)
+    root = path[0] if path else ""
     for sentence in _split_sentences(text):
         if _contains_forbidden_term(sentence):
             continue
+        if root in {"scenario_summary", "aggressive_view", "conservative_view", "must_watch"}:
+            if "KIS 거래량" in sentence or "거래량 1위" in sentence:
+                continue
         if _sentence_has_unknown_number(sentence, allowed_numbers):
             continue
         if not _has_anchor_term(sentence, anchor_terms, required_terms):
@@ -261,9 +271,11 @@ def _build_prompt(session: str, context: dict[str, Any]) -> str:
         "KIS 거래량 순위는 전체시장 Top이 아니라 KIS API 기반 후보군이다.",
         "현재 데이터에 없는 뉴스, 공시, 수주, 계약, 외국인 투자자 동향, 외국인 선물, 프로그램 매매를 언급하지 마라.",
         "투자 추천이 아니라 관찰 조건과 리스크 기준을 제시하라.",
+        "Morning에서는 단기 전략, 시세차익, 추격 매수 같은 매매성 표현을 쓰지 마라.",
+        "Morning에서는 당일 KIS 거래량 후보만으로 시나리오 근거를 만들지 마라.",
         "각 종목별 해석은 반드시 입력 데이터 중 최소 1개와 직접 연결하라.",
         "거래대금 유지 여부, 상승 지속·과열 부담, 현재 데이터로는 확인 제한, KIS 거래량 상위와의 연결성, score/label 기반 리스크 중 하나는 반드시 포함하라.",
-        "관련 뉴스 참고, 업황 확인, 특정 이슈, 기술적 반등 같은 일반론만 쓰지 마라.",
+        "관련 뉴스 참고, 업황 확인, 특정 이슈, 기술적 반등, 연관성을 확인해 볼 필요 같은 일반론만 쓰지 마라.",
         "각 종목별로 서로 다른 해석을 작성하라.",
         "같은 문장을 반복하지 마라.",
         "응답은 JSON만 반환하라.",

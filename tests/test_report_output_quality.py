@@ -23,6 +23,10 @@ class ReportOutputQualityTests(unittest.TestCase):
                 "carry_forward_fields": [],
             },
             "macro": {
+                "base_date": "2026-05-08",
+                "source": "KIS",
+                "source_symbol": "0001",
+                "quality_flag": "OK",
                 "sp500": 5000,
                 "sp500_change_value": 10,
                 "sp500_change_rate": 0.002,
@@ -35,7 +39,7 @@ class ReportOutputQualityTests(unittest.TestCase):
                 "vix": 15,
                 "vix_change_value": -0.1,
                 "vix_change_rate": -0.01,
-                "usdkrw": 1452,
+                "usdkrw": 1484.3,
                 "usdkrw_change_value": 0.0,
                 "usdkrw_change_rate": 0.0,
                 "dxy": 100,
@@ -234,16 +238,38 @@ class ReportOutputQualityTests(unittest.TestCase):
         self.assertNotIn("기대은", morning)
         self.assertNotIn("부담는", morning)
 
-    def test_index_quality_warning_is_shown_for_suspicious_index(self):
+    def test_index_quality_warning_is_not_shown_for_valid_intraday_index(self):
         morning = generate_morning_brief(self.bundle, "2026-05-08")["report_text"]
         regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)
-        self.assertIn("지수 원천 확인 필요", morning)
-        self.assertIn("지수 원천 확인 필요", regular)
+        self.assertNotIn("지수 원천 확인 필요", morning)
+        self.assertNotIn("지수 원천 확인 필요", regular)
+        self.assertIn("7,498", regular)
+
+    def test_usdkrw_range_wording_tracks_actual_level(self):
+        regular = _build_simple_non_morning_report("regular", "2026-05-08", self.bundle)
+        closing = _build_simple_non_morning_report("closing", "2026-05-08", self.bundle)
+        self.assertIn("1,480원대", regular)
+        self.assertIn("1,480원대", closing)
+        self.assertNotIn("1,450원대", regular)
+        self.assertNotIn("1,450원대", closing)
 
     def test_closing_has_recap_line(self):
         closing = _build_simple_non_morning_report("closing", "2026-05-08", self.bundle)
         self.assertIn("KIS 거래량 순위", closing)
         self.assertIn("상대 강도", closing)
+
+    def test_kis_volume_rows_are_sorted_and_formatted(self):
+        bundle = dict(self.bundle)
+        bundle["rankings"] = [
+            {"source": "KIS", "rank_type": "volume", "symbol": "A", "name": "A", "rank": 4, "volume": "39,532,02", "market": "KOSPI"},
+            {"source": "KIS", "rank_type": "volume", "symbol": "B", "name": "B", "rank": 1, "volume": 1000000, "market": "KOSPI"},
+            {"source": "KIS", "rank_type": "volume", "symbol": "C", "name": "C", "rank": 2, "volume": 900000, "market": "KOSPI"},
+        ]
+        regular = _build_simple_non_morning_report("regular", "2026-05-08", bundle)
+        self.assertLess(regular.find("rank 1"), regular.find("rank 2"))
+        self.assertLess(regular.find("rank 2"), regular.find("rank 4"))
+        self.assertNotRegex(regular, r"39,532,02(?!\d)")
+        self.assertIn("3,953,202", regular)
 
     def test_stale_but_usable_etf_is_secondary_signal(self):
         morning = generate_morning_brief(self.bundle, "2026-05-08")["report_text"]

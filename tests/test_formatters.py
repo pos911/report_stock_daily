@@ -6,6 +6,7 @@ from src.utils.formatters import (
     detect_stock_price_anomaly,
     format_bp,
     format_index,
+    format_krw_range,
     format_market_cap,
     format_pct,
     format_price,
@@ -21,6 +22,8 @@ from src.utils.formatters import (
 class FormatterTests(unittest.TestCase):
     def test_format_usdkrw(self):
         self.assertEqual(format_usdkrw(1450.25), "1달러 = 1,450.25원")
+        self.assertEqual(format_krw_range(1484.3), "1,480원대")
+        self.assertEqual(format_krw_range(1450.8), "1,450원대")
 
     def test_format_index(self):
         self.assertEqual(format_index(5123.456), "5,123.46")
@@ -50,9 +53,32 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(format_spread_bp(None), NA_TEXT)
         self.assertEqual(format_yield_spread(0.468, -4.4), "+46.8bp / 전일대비 -4.4bp")
 
-    def test_market_anomaly_warning(self):
+    def test_market_anomaly_allows_valid_kis_intraday_index(self):
+        self.assertIsNone(
+            detect_market_value_anomaly(
+                "KOSPI",
+                7822.24,
+                change_rate=0.001,
+                as_of_date="2026-05-11",
+                target_date="2026-05-11",
+                data_quality_flag="OK",
+                source="KIS",
+                source_symbol="0001",
+            )
+        )
+
+    def test_market_anomaly_warns_on_invalid_quality(self):
         self.assertEqual(
-            detect_market_value_anomaly("KOSPI", 7822.24, change_rate=0.001, as_of_date="2026-05-11", target_date="2026-05-11"),
+            detect_market_value_anomaly(
+                "KOSPI",
+                7822.24,
+                change_rate=0.001,
+                as_of_date="2026-05-11",
+                target_date="2026-05-11",
+                data_quality_flag="INVALID",
+                source="KIS",
+                source_symbol="0001",
+            ),
             "지수 원천 확인 필요",
         )
         self.assertIsNone(detect_market_value_anomaly("KOSPI", 2700))

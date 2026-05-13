@@ -38,12 +38,32 @@ class SupabaseStockDataReader:
         self.client = self.base_reader.client
         self._last_watchlist_diagnostics: dict[str, Any] = {}
 
+    INTRADAY_MACRO_ALLOWED_FLAGS = {"OK", "FALLBACK_DAILY", "FALLBACK_YAHOO", "ANOMALY", "SOURCE_MISMATCH"}
+    INTRADAY_MACRO_EXCLUDED_FLAGS = {"INVALID", "MISSING", "STALE"}
+    INTRADAY_SERIES_FIELD_MAP = {
+        "SP500": "sp500",
+        "NASDAQ": "nasdaq",
+        "SOX": "sox",
+        "VIX": "vix",
+        "USDKRW": "usdkrw",
+        "DXY": "dxy",
+        "US10Y": "us10y",
+        "US3Y": "us3y",
+        "KR10Y": "kr10y",
+        "BRENT": "brent",
+        "WTI": "wti",
+        "KOSPI": "kospi",
+        "KOSDAQ": "kosdaq",
+    }
+
     def get_report_contract_bundle(self, report_type: str = "morning", target_date: str | None = None) -> dict:
-        freshness = self.get_report_data_freshness(target_date)
-        macro = self.get_morning_macro_snapshot(target_date)
-        sector_etfs = self.get_sector_etf_signals(target_date)
-        watchlist = self.get_watchlist_snapshot(target_date)
-        rankings = self.get_market_rankings(target_date)
+        normalized_target_date = self._normalize_date(target_date)
+        session_cutoff_date = self._resolve_session_cutoff_date(report_type, normalized_target_date)
+        freshness = self.get_report_data_freshness(normalized_target_date)
+        macro = self.get_macro_snapshot(report_type, normalized_target_date)
+        sector_etfs = self.get_sector_etf_signals(session_cutoff_date)
+        watchlist = self.get_watchlist_snapshot(session_cutoff_date)
+        rankings = self.get_market_rankings(session_cutoff_date)
         fallback_used = bool(
             freshness.get("contract_fallback_used")
             or macro.get("contract_fallback_used")
@@ -62,7 +82,7 @@ class SupabaseStockDataReader:
             failed_views.append("report_watchlist_snapshot_view")
         if any(row.get("contract_fallback_used") for row in rankings):
             failed_views.append("report_market_ranking_view")
-        readiness = self.normalize_report_readiness(self.base_reader.fetch_stockdata_report_readiness(target_date))
+        readiness = self.normalize_report_readiness(self.base_reader.fetch_stockdata_report_readiness(normalized_target_date))
         return {
             "freshness": freshness,
             "macro": macro,
@@ -73,6 +93,7 @@ class SupabaseStockDataReader:
             "readiness": readiness,
             "contract_fallback_used": fallback_used,
             "contract_failed_views": failed_views,
+            "session_cutoff_date": session_cutoff_date,
         }
 
     def normalize_report_readiness(self, readiness: dict | None) -> dict:
@@ -203,29 +224,37 @@ class SupabaseStockDataReader:
         return row
 
     def get_morning_macro_snapshot(self, target_date: str | None = None) -> dict:
+        return self.get_macro_snapshot("morning", target_date)
+
+    def get_macro_snapshot(self, report_type: str, target_date: str | None = None) -> dict:
         normalized_target_date = self._normalize_date(target_date)
+        effective_date = self._resolve_macro_effective_date(report_type, normalized_target_date)
+        warnings: list[str] = []
+
         rows = self._fetch_view_rows("report_morning_macro_view", limit=200, order_column="base_date")
-        eligible_rows = self._filter_rows_on_or_before(rows, "base_date", normalized_target_date)
-        macro = dict(eligible_rows[0]) if eligible_rows else self._fetch_latest_row_on_or_before("normalized_global_macro_daily", normalized_target_date)
+        eligible_rows = self._filter_rows_on_or_before(rows, "base_date", effective_date)
+        macro = dict(eligible_rows[0]) if eligible_rows else self._fetch_latest_row_on_or_before("normalized_global_macro_daily", effective_date)
         macro["contract_fallback_used"] = not bool(rows)
-        warnings = []
+        macro["macro_source_mode"] = "daily"
         if macro["contract_fallback_used"]:
             warnings.append("contract fallback used: report_morning_macro_view unavailable")
 
         if not macro:
             macro = {"base_date": None}
+        intraday_rows = self._fetch_intraday_macro_rows_for_date(effective_date)
+        intraday_selected = self._select_latest_intraday_rows_by_series(intraday_rows)
+        if intraday_selected:
+            self._apply_intraday_macro_rows(macro, intraday_selected)
+            macro["macro_source_mode"] = "intraday_blended" if report_type in {"regular", "closing"} else "previous_intraday_blended"
+        elif report_type in {"regular", "closing"}:
+            warnings.append("contract fallback used: normalized_macro_intraday unavailable")
+        macro["data_quality_flag"] = macro.get("data_quality_flag") or macro.get("quality_flag")
         previous = self._select_previous_macro_row(eligible_rows, macro.get("base_date")) or self._fetch_previous_macro_row(macro.get("base_date"))
         self._inject_deltas(macro, previous, warnings)
-        breadth = self._fetch_latest_row_on_or_before("market_breadth_daily", normalized_target_date)
-        macro["breadth"] = breadth
-        advances = self._to_float(breadth.get("advances"))
-        declines = self._to_float(breadth.get("declines"))
-        if advances is not None and declines is not None and (advances + declines) > 0:
-            macro["advancing_ratio"] = advances / (advances + declines)
-        else:
-            macro["advancing_ratio"] = None
-            warnings.append("market breadth unavailable")
+        breadth = self._fetch_latest_row_on_or_before("market_breadth_daily", effective_date)
+        self._attach_breadth(macro, breadth, warnings)
         macro["target_date"] = normalized_target_date
+        macro["effective_date"] = effective_date
         macro["warnings"] = warnings
         return macro
 
@@ -329,10 +358,11 @@ class SupabaseStockDataReader:
             eligible_rows = self._filter_rows_on_or_before(rows, "base_date", normalized_target_date)
             latest_date = max((str(row.get("base_date") or "") for row in eligible_rows), default="")
             latest_rows = [row for row in eligible_rows if str(row.get("base_date") or "") == latest_date] if latest_date else []
-            return [
+            normalized_rows = [
                 self._normalize_ranking_row(row, contract_fallback_used=False, target_date=target_date)
                 for row in latest_rows
             ]
+            return sorted(normalized_rows, key=lambda row: (str(row.get("rank_type") or ""), int(self._to_float(row.get("rank")) or 999999), str(row.get("symbol") or "")))
         latest_date = self._get_latest_base_date_on_or_before("normalized_market_rankings_daily", normalized_target_date)
         
         # [NEW] Apply source filtering rules for fallback
@@ -357,7 +387,8 @@ class SupabaseStockDataReader:
             else:
                 filtered_rows.append(row)
                 
-        return [self._normalize_ranking_row(row, contract_fallback_used=True, target_date=target_date) for row in filtered_rows]
+        normalized_rows = [self._normalize_ranking_row(row, contract_fallback_used=True, target_date=target_date) for row in filtered_rows]
+        return sorted(normalized_rows, key=lambda row: (str(row.get("rank_type") or ""), int(self._to_float(row.get("rank")) or 999999), str(row.get("symbol") or "")))
 
     def fetch_report_contract_bundle(self) -> dict:
         return self.get_report_contract_bundle("morning")
@@ -366,6 +397,24 @@ class SupabaseStockDataReader:
         if value:
             return str(value)
         return dt.date.today().isoformat()
+
+    def _resolve_session_cutoff_date(self, report_type: str, target_date: str) -> str:
+        if report_type != "morning":
+            return target_date
+        calendar_status = self.base_reader.fetch_market_calendar_status(target_date)
+        previous_trading_day = (
+            calendar_status.get("xkrx_previous_trading_day")
+            or calendar_status.get("xnys_previous_trading_day")
+        )
+        if previous_trading_day:
+            return str(previous_trading_day)
+        try:
+            return (dt.date.fromisoformat(target_date) - dt.timedelta(days=1)).isoformat()
+        except ValueError:
+            return target_date
+
+    def _resolve_macro_effective_date(self, report_type: str, target_date: str) -> str:
+        return self._resolve_session_cutoff_date(report_type, target_date)
 
     def _fetch_view_rows(self, view_name: str, limit: int = 1000, order_column: str | None = None) -> list[dict]:
         try:
@@ -376,6 +425,16 @@ class SupabaseStockDataReader:
             return response.data or []
         except Exception:
             return []
+
+    def _fetch_intraday_macro_rows_for_date(self, base_date: str | None) -> list[dict]:
+        if not base_date:
+            return []
+        return self._fetch_rows(
+            "normalized_macro_intraday",
+            columns="*",
+            limit=500,
+            filters=[("eq", "base_date", base_date)],
+        )
 
     def _fetch_rows(self, table_name: str, columns: str = "*", limit: int = 1000, filters: list[tuple[str, str, Any]] | None = None) -> list[dict]:
         try:
@@ -432,6 +491,17 @@ class SupabaseStockDataReader:
         except Exception:
             return {}
 
+    def _fetch_previous_intraday_macro_row(self, current_base_date: str | None) -> dict:
+        if not current_base_date:
+            return {}
+        rows = self._fetch_rows(
+            "normalized_macro_intraday",
+            columns="*",
+            limit=500,
+            filters=[("lt", "base_date", current_base_date)],
+        )
+        return self._select_latest_intraday_macro_row(rows) or {}
+
     def _get_latest_base_date(self, table_name: str) -> str | None:
         row = self._fetch_latest_row(table_name)
         return row.get("base_date")
@@ -456,7 +526,7 @@ class SupabaseStockDataReader:
                         warnings=warnings,
                     )
                 if field in BP_FIELDS:
-                    current[f"{field}_change_bp"] = None
+                    current[f"{field}_change_bp"] = self._to_float(current.get(f"{field}_change_bp"))
                 continue
             change_value = current_value - previous_value
             current[f"{field}_change_value"] = change_value
@@ -478,6 +548,8 @@ class SupabaseStockDataReader:
             current["us10y_us3y_spread_change_bp"] = (
                 (current["us10y_us3y_spread"] - prev_spread) * 100 if prev_spread is not None else None
             )
+        elif current.get("us10y_us3y_spread_change_bp") is not None:
+            current["us10y_us3y_spread_change_bp"] = self._to_float(current.get("us10y_us3y_spread_change_bp"))
 
     def _normalize_percent_change_rate(
         self,
@@ -803,6 +875,80 @@ class SupabaseStockDataReader:
             if current is None or row_date > current_date:
                 latest[symbol] = row
         return latest
+
+    def _attach_breadth(self, macro: dict, breadth: dict, warnings: list[str]) -> None:
+        macro["breadth"] = breadth
+        advances = self._to_float(breadth.get("advances"))
+        declines = self._to_float(breadth.get("declines"))
+        if advances is not None and declines is not None and (advances + declines) > 0:
+            macro["advancing_ratio"] = advances / (advances + declines)
+        else:
+            macro["advancing_ratio"] = None
+            warnings.append("market breadth unavailable")
+
+    def _macro_row_sort_key(self, row: dict) -> tuple[str, str]:
+        return (
+            str(row.get("base_date") or ""),
+            str(
+                row.get("observed_at")
+                or row.get("captured_at")
+                or row.get("as_of_utc")
+                or row.get("available_at")
+                or row.get("collected_at")
+                or row.get("updated_at")
+                or row.get("created_at")
+                or row.get("recorded_at")
+                or ""
+            ),
+        )
+
+    def _quality_flag_allowed(self, row: dict) -> bool:
+        quality_flag = str(
+            row.get("quality_flag")
+            or row.get("data_quality_flag")
+            or ""
+        ).upper()
+        if not quality_flag:
+            return True
+        if quality_flag in self.INTRADAY_MACRO_EXCLUDED_FLAGS:
+            return False
+        return quality_flag in self.INTRADAY_MACRO_ALLOWED_FLAGS
+
+    def _select_latest_intraday_macro_row(self, rows: list[dict]) -> dict:
+        eligible = [dict(row) for row in rows if self._quality_flag_allowed(row)]
+        if not eligible:
+            return {}
+        eligible.sort(key=self._macro_row_sort_key, reverse=True)
+        return eligible[0]
+
+    def _select_latest_intraday_rows_by_series(self, rows: list[dict]) -> dict[str, dict]:
+        latest: dict[str, dict] = {}
+        for row in rows:
+            if not self._quality_flag_allowed(row):
+                continue
+            series_id = str(row.get("series_id") or "").upper()
+            if not series_id:
+                continue
+            current = latest.get(series_id)
+            if current is None or self._macro_row_sort_key(row) > self._macro_row_sort_key(current):
+                latest[series_id] = dict(row)
+        return latest
+
+    def _apply_intraday_macro_rows(self, macro: dict, rows_by_series: dict[str, dict]) -> None:
+        for series_id, row in rows_by_series.items():
+            field = self.INTRADAY_SERIES_FIELD_MAP.get(series_id)
+            if not field:
+                continue
+            macro[field] = row.get("value")
+            macro[f"{field}_change_rate"] = row.get("change_rate")
+            macro[f"{field}_source"] = row.get("source")
+            macro[f"{field}_source_symbol"] = row.get("source_symbol")
+            macro[f"{field}_data_quality_flag"] = row.get("quality_flag")
+            macro[f"{field}_observed_at"] = row.get("observed_at")
+            if field in {"kospi", "kosdaq", "usdkrw"}:
+                macro["source"] = row.get("source")
+                macro["source_symbol"] = row.get("source_symbol")
+                macro["quality_flag"] = row.get("quality_flag")
 
     def _filter_rows_on_or_before(self, rows: list[dict], date_key: str, target_date: str | None) -> list[dict]:
         if not target_date:

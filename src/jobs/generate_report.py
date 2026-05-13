@@ -30,6 +30,8 @@ from src.utils.formatters import (
     add_section,
     detect_market_value_anomaly,
     detect_stock_price_anomaly,
+    format_integer,
+    format_krw_range,
     format_number,
     format_pct,
     format_price,
@@ -70,6 +72,9 @@ FINAL_REPORT_FORBIDDEN_TERMS = (
     "기술적 반등",
     "업황 및 경쟁사 동향",
     "특정 이슈",
+    "단기 전략",
+    "연관성을 확인",
+    "연관성을 확인해 볼 필요",
 )
 REPORT_TEXT_FIXUPS = {
     "반도체·조선와": "반도체·조선과",
@@ -273,6 +278,15 @@ def _build_gemini_context(report_type: str, report_date: str, bundle: dict) -> d
     watchlist = bundle.get("watchlist") or []
     sector_etfs = bundle.get("sector_etfs") or []
     macro = bundle.get("macro") or {}
+    kis_rank_lookup = {
+        str(row.get("symbol") or ""): row.get("rank")
+        for row in rankings
+        if row.get("rank_type") == "volume" and row.get("source") == "KIS"
+    }
+    kis_volume_rows = sorted(
+        [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"],
+        key=lambda row: (safe_float(row.get("rank")) or 999999, str(row.get("symbol") or "")),
+    )
     return {
         "report_date": report_date,
         "session": report_type,
@@ -304,8 +318,7 @@ def _build_gemini_context(report_type: str, report_date: str, bundle: dict) -> d
                 "rank": row.get("rank"),
                 "volume": row.get("volume"),
             }
-            for row in rankings
-            if row.get("rank_type") == "volume" and row.get("source") == "KIS"
+            for row in kis_volume_rows
         ][:5],
         "watchlist": [
             {
@@ -318,6 +331,7 @@ def _build_gemini_context(report_type: str, report_date: str, bundle: dict) -> d
                 "sector_group": row.get("sector_group"),
                 "source_mixed": row.get("source_mixed"),
                 "data_status": row.get("data_status"),
+                "kis_volume_rank": kis_rank_lookup.get(str(row.get("symbol") or "")),
             }
             for row in watchlist[:7]
         ],
@@ -344,14 +358,17 @@ def _generate_gemini_insight(report_type: str, report_date: str, bundle: dict) -
 
 
 def _format_index_with_quality_gate(label: str, value, macro: dict, target_date: str) -> str:
+    field_key = label.lower().replace("&", "").replace(" ", "")
     warning = detect_market_value_anomaly(
         label,
         value,
-        change_rate=macro.get(f"{label.lower()}_change_rate"),
+        change_rate=macro.get(f"{field_key}_change_rate"),
         as_of_date=macro.get("base_date"),
         target_date=target_date,
-        data_quality_flag=macro.get("data_quality_flag"),
-        source_consistency_status=macro.get("source_consistency_status"),
+        data_quality_flag=macro.get(f"{field_key}_data_quality_flag") or macro.get("data_quality_flag") or macro.get("quality_flag"),
+        source_consistency_status=macro.get(f"{field_key}_source_consistency_status") or macro.get("source_consistency_status"),
+        source=macro.get(f"{field_key}_source") or macro.get("source"),
+        source_symbol=macro.get(f"{field_key}_source_symbol") or macro.get("source_symbol"),
     )
     if warning:
         return warning
@@ -422,12 +439,15 @@ def _build_simple_non_morning_report(report_type: str, report_date: str, bundle:
     section_no = add_section(lines, section_no, "국내 데이터 범위", limitation_body)
 
     if "kis_volume_top" in (readiness.get("report_allowed_sections") or []):
-        volume_rows = [
-            row for row in rankings
-            if row.get("rank_type") == "volume" and row.get("source") == "KIS"
-        ][:5]
+        volume_rows = sorted(
+            [
+                row for row in rankings
+                if row.get("rank_type") == "volume" and row.get("source") == "KIS"
+            ],
+            key=lambda row: (safe_float(row.get("rank")) or 999999, str(row.get("symbol") or "")),
+        )[:5]
         volume_body = [
-            f"- {row.get('name') or row.get('symbol')}({row.get('symbol')}), {row.get('market')}, rank {row.get('rank')}, 거래량 {format_number(row.get('volume'), 0)}"
+            f"- {row.get('name') or row.get('symbol')}({row.get('symbol')}), {row.get('market')}, rank {row.get('rank')}, 거래량 {format_integer(row.get('volume'))}"
             for row in volume_rows
         ]
         for insight_line in [str(item).strip() for item in (gemini_insight or {}).get("kis_volume_interpretation", []) if str(item).strip()]:
@@ -490,10 +510,16 @@ def _build_session_summary(report_type: str, macro: dict, rankings: list[dict], 
     usdkrw = safe_float(macro.get("usdkrw"))
     if report_type == "regular":
         if usdkrw is not None and usdkrw >= 1450:
-            return "환율 1,450원대가 유지되는 동안 성장주 추격은 제한하고, KIS 거래량 상위 지속 여부와 관심종목 Signal 변화만 선별 확인합니다."
+            return f"환율 {format_krw_range(usdkrw)}가 유지되는 동안 성장주 추격은 제한하고, KIS 거래량 상위 지속 여부와 관심종목 Signal 변화만 선별 확인합니다."
         return "환율 부담이 제한적이면 KIS 거래량 상위 지속 여부와 관심종목 Signal 개선 종목을 우선 확인합니다."
 
-    volume_names = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:3]
+    volume_names = [
+        row.get("name") or row.get("symbol")
+        for row in sorted(
+            [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"],
+            key=lambda row: (safe_float(row.get("rank")) or 999999, str(row.get("symbol") or "")),
+        )[:3]
+    ]
     strong_watch = []
     for row in watchlist[:5]:
         derived = _derive_watchlist_signal(row)
@@ -509,9 +535,15 @@ def _build_session_summary(report_type: str, macro: dict, rankings: list[dict], 
 
 def _build_non_morning_checkpoints(report_type: str, readiness: dict, macro: dict, rankings: list[dict], watchlist: list[dict], gemini_insight: dict | None = None) -> list[str]:
     if report_type == "closing":
-        top_volume = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:2]
+        top_volume = [
+            row.get("name") or row.get("symbol")
+            for row in sorted(
+                [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"],
+                key=lambda row: (safe_float(row.get("rank")) or 999999, str(row.get("symbol") or "")),
+            )[:2]
+        ]
         lines = [
-            f"- 공격적 조건: {'·'.join(top_volume) if top_volume else 'KIS 거래량 상위'}이 다음 거래일에도 거래량 상위를 유지하고, 관심종목 거래대금이 동반 확대되는지 확인",
+            f"- 공격적 조건: {('KIS 거래량 상위 종목군(' + '·'.join(top_volume) + ')') if top_volume else 'KIS 거래량 상위 종목군'}이 다음 거래일에도 거래량 상위를 유지하고, 관심종목 거래대금이 동반 확대되는지 확인",
             "- 보수적 조건: 환율과 금리가 다시 상승하면 추격보다 눌림 확인을 우선",
             "- 반드시 확인할 데이터: 미국장 반도체 흐름, USD/KRW, KIS 거래량 상위 지속 여부",
         ]
@@ -543,7 +575,13 @@ def _build_regular_view_check_section(bundle: dict, gemini_insight: dict | None 
 
     theme_candidates = [row.get("sector_group") for row in sector_etfs if row.get("sector_group")]
     theme_candidates = list(dict.fromkeys(theme_candidates))[:3]
-    volume_names = [row.get("name") or row.get("symbol") for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:3]
+    volume_names = [
+        row.get("name") or row.get("symbol")
+        for row in sorted(
+            [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"],
+            key=lambda row: (safe_float(row.get("rank")) or 999999, str(row.get("symbol") or "")),
+        )[:3]
+    ]
 
     maintain = watchlist[:2]
     mixed_or_stale = [row for row in watchlist[:5] if row.get("source_mixed") or str(row.get("data_status") or "").upper() == "STALE_BUT_USABLE"]
@@ -574,11 +612,14 @@ def _build_closing_key_message_section(bundle: dict, gemini_insight: dict | None
     rankings = bundle.get("rankings") or []
     watchlist = bundle.get("watchlist") or []
     keywords = []
-    if [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"][:1]:
+    if sorted(
+        [row for row in rankings if row.get("rank_type") == "volume" and row.get("source") == "KIS"],
+        key=lambda row: (safe_float(row.get("rank")) or 999999, str(row.get("symbol") or "")),
+    )[:1]:
         keywords.append("KIS 거래량 집중")
     usdkrw = safe_float(macro.get("usdkrw"))
     if usdkrw is not None and usdkrw >= 1450:
-        keywords.append("환율 1,450원대")
+        keywords.append(f"환율 {format_krw_range(usdkrw)}")
     if safe_change_rate(macro.get("brent_change_rate")) not in (None, 0) and safe_change_rate(macro.get("brent_change_rate")) > 0.01:
         keywords.append("유가 부담")
     strong = []

@@ -94,6 +94,21 @@ class GeminiInterpretationLayerTests(unittest.TestCase):
         self.assertIn("Gemini 보강 해석", result)
         self.assertIn("시초가 강세보다 거래대금 유지 여부를 먼저 봅니다.", result)
 
+    def test_morning_gemini_filters_rank_specific_kis_must_watch(self):
+        result = generate_morning_brief(
+            _bundle(),
+            "2026-05-11",
+            gemini_insight={
+                "scenario_summary": "환율과 반도체 흐름을 함께 확인합니다.",
+                "must_watch": [
+                    "흥아해운, 이노인스트루먼트의 KIS 거래량 1위 유지 여부 확인",
+                    "USD/KRW 방향 확인",
+                ],
+            },
+        )["report_text"]
+        self.assertNotIn("KIS 거래량 1위 유지 여부", result)
+        self.assertIn("USD/KRW 방향 확인", result)
+
     def test_regular_gemini_insight_is_injected(self):
         text = _build_simple_non_morning_report(
             "regular",

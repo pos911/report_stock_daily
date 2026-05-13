@@ -21,6 +21,20 @@ from src.signals.watchlist_morning import build_watchlist_morning_scores
 from src.utils.formatters import add_section
 
 
+def _is_allowed_morning_must_watch(item: str) -> bool:
+    text = str(item or "").strip()
+    if not text:
+        return False
+    blocked_terms = (
+        "KIS 거래량 1위",
+        "거래량 1위",
+        "KIS 거래량 상위 종목",
+    )
+    if any(term in text for term in blocked_terms):
+        return False
+    return True
+
+
 def _merge_gemini_scenario(base_lines: list[str], gemini_insight: dict | None) -> list[str]:
     if not gemini_insight:
         return base_lines
@@ -28,7 +42,11 @@ def _merge_gemini_scenario(base_lines: list[str], gemini_insight: dict | None) -
     scenario_summary = str(gemini_insight.get("scenario_summary") or "").strip()
     aggressive_view = str(gemini_insight.get("aggressive_view") or "").strip()
     conservative_view = str(gemini_insight.get("conservative_view") or "").strip()
-    must_watch = [str(item).strip() for item in (gemini_insight.get("must_watch") or []) if str(item).strip()]
+    must_watch = [
+        str(item).strip()
+        for item in (gemini_insight.get("must_watch") or [])
+        if _is_allowed_morning_must_watch(str(item))
+    ]
     if scenario_summary:
         merged.insert(0, f"- {scenario_summary}")
     if aggressive_view or conservative_view:

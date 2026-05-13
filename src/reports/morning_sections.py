@@ -116,7 +116,7 @@ def build_data_status_section(
 def build_one_line_judgment_section(regime: dict, top_sectors: list[dict], freshness: dict, readiness: dict) -> list[str]:
     lead_sector = _display_sector_name((top_sectors[0] if top_sectors else {}).get("sector_group"))
     second_sector = _display_sector_name((top_sectors[1] if len(top_sectors) > 1 else {}).get("sector_group"))
-    sector_text = lead_sector if not second_sector else f"{lead_sector}와 {second_sector}"
+    sector_text = lead_sector if not second_sector else _join_with_particle(lead_sector, second_sector)
     global_driver = _global_driver_summary(regime)
     risk_text = _risk_summary(top_sectors, regime)
 
@@ -145,26 +145,26 @@ def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dic
     lead_sector = _display_sector_name((top_sectors[0] if top_sectors else {}).get("sector_group"))
     second_sector = _display_sector_name((top_sectors[1] if len(top_sectors) > 1 else {}).get("sector_group"))
     watched = ", ".join(_display_stock_name(row.get("symbol"), row.get("name")) for row in watchlist_scores[:2]) or "관심종목"
+    sector_pair_text = ""
+    if lead_sector and second_sector:
+        sector_pair_text = _join_with_particle(lead_sector, second_sector)
+    else:
+        sector_pair_text = lead_sector or second_sector or "주도 테마"
 
     attack = []
     attack.append(
         "SOX와 Nasdaq 강세가 이어지고 USD/KRW가 안정되면 "
         f"{lead_sector or '주도 테마'} 중심의 시초가 강세가 이어질 수 있습니다."
     )
-    if lead_sector or second_sector:
-        if lead_sector and second_sector:
-            attack.append(
-                f"단, {lead_sector}와 {second_sector} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
-            )
-        else:
-            attack.append(
-                f"단, {lead_sector or second_sector} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
-            )
+    if sector_pair_text:
+        attack.append(
+            f"단, {sector_pair_text} 관련 대표 종목은 거래대금이 유지될 때만 추격 판단이 가능합니다."
+        )
 
     defensive = []
     defensive.append("환율, 유가, 금리 또는 단기 과열 신호가 겹치면 추격보다 눌림 확인이 우선입니다.")
     if readiness.get("display_mode") != "FULL_MARKET":
-        defensive.append("전체시장 커버리지가 제한돼 KIS 거래량 상위와 관심종목 반응만 선별적으로 해석합니다.")
+        defensive.append("국내 리포트는 KIS 유니버스 기반으로 운영하므로 KIS 거래량 후보와 관심종목 반응만 선별적으로 해석합니다.")
     if any(row.get("data_status") == "STALE_BUT_USABLE" for row in top_sectors):
         defensive.append("기준일이 하루 이상 지난 ETF는 보조 신호로만 해석합니다.")
 
@@ -196,6 +196,22 @@ def build_scenario_section(regime: dict, top_sectors: list[dict], freshness: dic
         "장초반 확인 조건:",
         *[f"- {item}" for item in opening_checks[:4]],
     ]
+
+
+def _join_with_particle(left: str, right: str) -> str:
+    left = str(left or "").strip()
+    right = str(right or "").strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    last_char = left[-1]
+    if "가" <= last_char <= "힣":
+        code = ord(last_char) - ord("가")
+        particle = "과" if code % 28 else "와"
+    else:
+        particle = "와"
+    return f"{left}{particle} {right}"
 
 
 def build_global_market_section(macro: dict) -> list[str]:
@@ -524,6 +540,12 @@ def _interpret_rate(change_bp, meaning: str) -> str:
     particle = _topic_particle(meaning)
     if numeric is None:
         return f"{meaning}{particle} 미확인입니다."
+    if "부담" in meaning:
+        if numeric <= -5:
+            return f"{meaning} 완화 가능성이 있습니다."
+        if numeric >= 5:
+            return f"{meaning}이 있습니다."
+        return f"{meaning}{particle} 중립입니다."
     if numeric <= -5:
         return f"{meaning}{particle} 우호적입니다."
     if numeric >= 5:

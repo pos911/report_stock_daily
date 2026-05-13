@@ -1,4 +1,5 @@
 import unittest
+import datetime as dt
 
 from src.services.supabase_stockdata_reader import SupabaseStockDataReader
 
@@ -7,6 +8,21 @@ class SupabaseStockDataReaderTests(unittest.TestCase):
     def setUp(self):
         self.reader = SupabaseStockDataReader.__new__(SupabaseStockDataReader)
         self.reader._last_watchlist_diagnostics = {}
+        def _calendar_status(_self, report_date=None):
+            base = dt.date.fromisoformat(str(report_date or "2026-05-13"))
+            previous = (base - dt.timedelta(days=1)).isoformat()
+            return {
+                "xkrx_previous_trading_day": previous,
+                "xnys_previous_trading_day": previous,
+            }
+        self.reader.base_reader = type(
+            "BaseReaderStub",
+            (),
+            {
+                "fetch_market_calendar_status": _calendar_status,
+                "fetch_static_stock_universe": lambda _self: [],
+            },
+        )()
 
     def test_change_rate_recalculated_from_change_amount_and_previous_value(self):
         warnings = []
@@ -116,14 +132,58 @@ class SupabaseStockDataReaderTests(unittest.TestCase):
             {"base_date": "2026-05-08", "sp500": 8},
             {"base_date": "2026-05-07", "sp500": 7},
         ]
-        self.reader._fetch_latest_row_on_or_before = lambda *args, **kwargs: {"base_date": "2026-05-08", "sp500": 8}
+        self.reader._fetch_intraday_macro_rows_for_date = lambda base_date: []
+        self.reader._fetch_latest_row_on_or_before = lambda *args, **kwargs: {"base_date": "2026-05-07", "sp500": 7}
         self.reader._fetch_previous_macro_row = lambda current_base_date: {}
         self.reader._inject_deltas = lambda current, previous, warnings=None: None
-        self.reader.get_report_data_freshness = lambda target_date=None: {}
+        self.reader._attach_breadth = lambda macro, breadth, warnings: macro.update({"breadth": breadth, "advancing_ratio": None})
         self.reader._select_previous_macro_row = SupabaseStockDataReader._select_previous_macro_row.__get__(self.reader, SupabaseStockDataReader)
         macro = self.reader.get_morning_macro_snapshot("2026-05-08")
-        self.assertEqual(macro["base_date"], "2026-05-08")
-        self.assertEqual(macro["sp500"], 8)
+        self.assertEqual(macro["effective_date"], "2026-05-07")
+        self.assertEqual(macro["base_date"], "2026-05-07")
+        self.assertEqual(macro["sp500"], 7)
+
+    def test_morning_bundle_uses_previous_trading_day_cutoff(self):
+        self.reader.get_report_data_freshness = lambda target_date=None: {}
+        self.reader.get_macro_snapshot = lambda report_type, target_date=None: {"base_date": "2026-05-12", "contract_fallback_used": False}
+        self.reader.get_sector_etf_signals = lambda target_date=None: [{"latest_price_date": target_date, "contract_fallback_used": False}]
+        self.reader.get_watchlist_snapshot = lambda target_date=None: [{"base_date": target_date, "contract_fallback_used": False}]
+        self.reader.get_market_rankings = lambda target_date=None: [{"base_date": target_date, "contract_fallback_used": False}]
+        self.reader.normalize_report_readiness = lambda readiness=None: {}
+        self.reader.base_reader.fetch_stockdata_report_readiness = lambda target_date=None: {}
+        bundle = self.reader.get_report_contract_bundle("morning", "2026-05-13")
+        self.assertEqual(bundle["session_cutoff_date"], "2026-05-12")
+        self.assertEqual(bundle["watchlist"][0]["base_date"], "2026-05-12")
+        self.assertEqual(bundle["rankings"][0]["base_date"], "2026-05-12")
+
+    def test_regular_macro_prefers_same_day_intraday_row(self):
+        self.reader._fetch_intraday_macro_rows_for_date = lambda base_date: [
+            {"base_date": "2026-05-13", "series_id": "KOSPI", "captured_at": "2026-05-13T10:31:00+09:00", "quality_flag": "OK", "value": 7822.24, "source": "KIS", "source_symbol": "0001"},
+            {"base_date": "2026-05-13", "series_id": "KOSPI", "captured_at": "2026-05-13T10:29:00+09:00", "quality_flag": "INVALID", "value": 1},
+        ]
+        self.reader._fetch_view_rows = lambda *args, **kwargs: []
+        self.reader._fetch_latest_row_on_or_before = lambda *args, **kwargs: {"base_date": "2026-05-13"}
+        self.reader._fetch_previous_intraday_macro_row = lambda current_base_date: {}
+        self.reader._fetch_previous_macro_row = lambda current_base_date: {}
+        self.reader._inject_deltas = lambda current, previous, warnings=None: None
+        self.reader._attach_breadth = lambda macro, breadth, warnings: macro.update({"breadth": breadth, "advancing_ratio": None})
+        macro = self.reader.get_macro_snapshot("regular", "2026-05-13")
+        self.assertEqual(macro["base_date"], "2026-05-13")
+        self.assertEqual(macro["macro_source_mode"], "intraday_blended")
+        self.assertEqual(macro["source"], "KIS")
+        self.assertEqual(macro["source_symbol"], "0001")
+
+    def test_closing_macro_falls_back_to_daily_when_intraday_missing(self):
+        self.reader._fetch_intraday_macro_rows_for_date = lambda base_date: []
+        self.reader._fetch_view_rows = lambda *args, **kwargs: [{"base_date": "2026-05-13", "kospi": 7800}]
+        self.reader._fetch_latest_row_on_or_before = lambda *args, **kwargs: {"base_date": "2026-05-13", "kospi": 7800}
+        self.reader._fetch_previous_macro_row = lambda current_base_date: {}
+        self.reader._inject_deltas = lambda current, previous, warnings=None: None
+        self.reader._attach_breadth = lambda macro, breadth, warnings: macro.update({"breadth": breadth, "advancing_ratio": None})
+        self.reader._select_previous_macro_row = SupabaseStockDataReader._select_previous_macro_row.__get__(self.reader, SupabaseStockDataReader)
+        macro = self.reader.get_macro_snapshot("closing", "2026-05-13")
+        self.assertEqual(macro["base_date"], "2026-05-13")
+        self.assertEqual(macro["macro_source_mode"], "daily")
 
     def test_sector_etf_signals_exclude_future_rows(self):
         self.reader._fetch_view_rows = lambda *args, **kwargs: [
@@ -138,12 +198,13 @@ class SupabaseStockDataReaderTests(unittest.TestCase):
     def test_market_rankings_use_latest_base_date_on_or_before_target(self):
         self.reader._fetch_view_rows = lambda *args, **kwargs: [
             {"symbol": "A", "base_date": "2026-05-09", "rank_type": "volume"},
-            {"symbol": "B", "base_date": "2026-05-08", "rank_type": "volume"},
-            {"symbol": "C", "base_date": "2026-05-07", "rank_type": "volume"},
+            {"symbol": "B", "base_date": "2026-05-08", "rank_type": "volume", "rank": 2},
+            {"symbol": "D", "base_date": "2026-05-08", "rank_type": "volume", "rank": 1},
+            {"symbol": "C", "base_date": "2026-05-07", "rank_type": "volume", "rank": 3},
         ]
         self.reader._normalize_ranking_row = lambda row, contract_fallback_used=False, target_date=None: dict(row)
         rows = self.reader.get_market_rankings("2026-05-08")
-        self.assertEqual([row["symbol"] for row in rows], ["B"])
+        self.assertEqual([row["symbol"] for row in rows], ["D", "B"])
 
     def test_resolve_source_mixed_from_quality_flag(self):
         self.assertTrue(

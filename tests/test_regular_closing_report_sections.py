@@ -7,7 +7,7 @@ class RegularClosingReportSectionTests(unittest.TestCase):
     def setUp(self):
         self.bundle = {
             "freshness": {"xkrx_is_open": True, "xnys_is_open": True},
-            "macro": {"kospi": 2700, "kosdaq": 850, "usdkrw": 1452, "brent_change_rate": 0.0},
+            "macro": {"kospi": 2700, "kosdaq": 850, "usdkrw": 1484.3, "brent_change_rate": 0.0},
             "watchlist": [
                 {
                     "name": "삼성전자",
@@ -43,7 +43,7 @@ class RegularClosingReportSectionTests(unittest.TestCase):
 
     def test_regular_summary_uses_usdkrw_threshold_wording(self):
         text = _build_simple_non_morning_report("regular", "2026-05-09", self.bundle)
-        self.assertIn("환율 1,450원대", text)
+        self.assertIn("환율 1,480원대", text)
 
 
 if __name__ == "__main__":
